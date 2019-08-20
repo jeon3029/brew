@@ -1,31 +1,39 @@
-#:  * `leaves`:
-#:    Show installed formulae that are not dependencies of another installed formula.
+# frozen_string_literal: true
 
 require "formula"
 require "tab"
-require "set"
+require "cli/parser"
 
 module Homebrew
+  module_function
+
+  def leaves_args
+    Homebrew::CLI::Parser.new do
+      usage_banner <<~EOS
+        `leaves`
+
+        Show installed formulae that are not dependencies of another installed formula.
+      EOS
+      switch :debug
+    end
+  end
+
   def leaves
-    installed = Formula.installed
-    deps_of_installed = Set.new
+    leaves_args.parse
 
-    installed.each do |f|
-      deps = []
+    installed = Formula.installed.sort
 
-      f.deps.each do |dep|
-        if dep.optional? || dep.recommended?
-          deps << dep.to_formula.full_name if f.build.with?(dep)
-        else
-          deps << dep.to_formula.full_name
+    deps_of_installed = installed.flat_map do |f|
+      f.runtime_dependencies.map do |dep|
+        begin
+          dep.to_formula.full_name
+        rescue FormulaUnavailableError
+          dep.name
         end
       end
-
-      deps_of_installed.merge(deps)
     end
 
-    installed.each do |f|
-      puts f.full_name unless deps_of_installed.include? f.full_name
-    end
+    leaves = installed.map(&:full_name) - deps_of_installed
+    leaves.each(&method(:puts))
   end
 end

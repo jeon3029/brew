@@ -1,35 +1,45 @@
-#: @hide_from_man_page
-#:  * `readall` [tap]:
-#:    Import all formulae in a tap (defaults to core tap).
-#:
-#:    This can be useful for debugging issues across all formulae
-#:    when making significant changes to `formula.rb`,
-#:    or to determine if any current formulae have Ruby issues
+# frozen_string_literal: true
 
 require "readall"
+require "cli/parser"
 
 module Homebrew
+  module_function
+
+  def readall_args
+    Homebrew::CLI::Parser.new do
+      usage_banner <<~EOS
+        `readall` [<options>] [<tap>]
+
+        Import all formulae from specified <tap> (defaults to all installed taps).
+        This can be useful for debugging issues across all formulae when making
+        significant changes to `formula.rb`, testing the performance of loading
+        all formulae or to determine if any current formulae have Ruby issues.
+      EOS
+      switch "--aliases",
+             description: "Verify any alias symlinks in each tap."
+      switch "--syntax",
+             description: "Syntax-check all of Homebrew's Ruby files."
+      switch :verbose
+      switch :debug
+    end
+  end
+
   def readall
-    if ARGV.include?("--syntax")
-      ruby_files = []
-      scan_files = %W[
-        #{HOMEBREW_LIBRARY}/*.rb
-        #{HOMEBREW_LIBRARY}/Homebrew/**/*.rb
-      ]
-      Dir.glob(scan_files).each do |rb|
-        next if rb.include?("/vendor/")
-        next if rb.include?("/cask/")
-        ruby_files << rb
-      end
+    readall_args.parse
+
+    if args.syntax?
+      scan_files = "#{HOMEBREW_LIBRARY_PATH}/**/*.rb"
+      ruby_files = Dir.glob(scan_files).reject { |file| file =~ %r{/(vendor|cask)/} }
 
       Homebrew.failed = true unless Readall.valid_ruby_syntax?(ruby_files)
     end
 
-    options = { aliases: ARGV.include?("--aliases") }
+    options = { aliases: args.aliases? }
     taps = if ARGV.named.empty?
       Tap
     else
-      [Tap.fetch(ARGV.named.first)]
+      ARGV.named.map { |t| Tap.fetch(t) }
     end
     taps.each do |tap|
       Homebrew.failed = true unless Readall.valid_tap?(tap, options)

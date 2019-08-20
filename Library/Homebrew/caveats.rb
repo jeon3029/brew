@@ -1,4 +1,10 @@
+# frozen_string_literal: true
+
+require "language/python"
+
 class Caveats
+  extend Forwardable
+
   attr_reader :f
 
   def initialize(f)
@@ -16,18 +22,64 @@ class Caveats
       f.build = build
     end
     caveats << keg_only_text
-    caveats << bash_completion_caveats
-    caveats << zsh_completion_caveats
-    caveats << fish_completion_caveats
+    caveats << function_completion_caveats(:bash)
+    caveats << function_completion_caveats(:zsh)
+    caveats << function_completion_caveats(:fish)
     caveats << plist_caveats
-    caveats << python_caveats
-    caveats << app_caveats
     caveats << elisp_caveats
     caveats.compact.join("\n")
   end
 
-  def empty?
-    caveats.empty?
+  delegate [:empty?, :to_s] => :caveats
+
+  def keg_only_text(skip_reason: false)
+    return unless f.keg_only?
+
+    s = if skip_reason
+      ""
+    else
+      <<~EOS
+        #{f.name} is keg-only, which means it was not symlinked into #{HOMEBREW_PREFIX},
+        because #{f.keg_only_reason.to_s.chomp}.
+      EOS
+    end.dup
+
+    if f.bin.directory? || f.sbin.directory?
+      s << <<~EOS
+
+        If you need to have #{f.name} first in your PATH run:
+      EOS
+      s << "  #{Utils::Shell.prepend_path_in_profile(f.opt_bin.to_s)}\n" if f.bin.directory?
+      s << "  #{Utils::Shell.prepend_path_in_profile(f.opt_sbin.to_s)}\n" if f.sbin.directory?
+    end
+
+    if f.lib.directory? || f.include.directory?
+      s << <<~EOS
+
+        For compilers to find #{f.name} you may need to set:
+      EOS
+
+      s << "  #{Utils::Shell.export_value("LDFLAGS", "-L#{f.opt_lib}")}\n" if f.lib.directory?
+
+      s << "  #{Utils::Shell.export_value("CPPFLAGS", "-I#{f.opt_include}")}\n" if f.include.directory?
+
+      if which("pkg-config", ENV["HOMEBREW_PATH"]) &&
+         ((f.lib/"pkgconfig").directory? || (f.share/"pkgconfig").directory?)
+        s << <<~EOS
+
+          For pkg-config to find #{f.name} you may need to set:
+        EOS
+
+        if (f.lib/"pkgconfig").directory?
+          s << "  #{Utils::Shell.export_value("PKG_CONFIG_PATH", "#{f.opt_lib}/pkgconfig")}\n"
+        end
+
+        if (f.share/"pkgconfig").directory?
+          s << "  #{Utils::Shell.export_value("PKG_CONFIG_PATH", "#{f.opt_share}/pkgconfig")}\n"
+        end
+      end
+    end
+    s << "\n"
   end
 
   private
@@ -42,118 +94,37 @@ class Caveats
     end.compact.first
   end
 
-  def keg_only_text
-    return unless f.keg_only?
-
-    s = "This formula is keg-only, which means it was not symlinked into #{HOMEBREW_PREFIX}."
-    s << "\n\n#{f.keg_only_reason}"
-    if f.lib.directory? || f.include.directory?
-      s <<
-        <<-EOS.undent_________________________________________________________72
-
-
-        Generally there are no consequences of this for you. If you build your
-        own software and it requires this formula, you'll need to add to your
-        build variables:
-
-        EOS
-      s << "    LDFLAGS:  -L#{f.opt_lib}\n" if f.lib.directory?
-      s << "    CPPFLAGS: -I#{f.opt_include}\n" if f.include.directory?
-
-      if which("pkg-config")
-        s << "    PKG_CONFIG_PATH: #{f.opt_lib}/pkgconfig\n" if (f.lib/"pkgconfig").directory?
-        s << "    PKG_CONFIG_PATH: #{f.opt_share}/pkgconfig\n" if (f.share/"pkgconfig").directory?
-      end
-    end
-    s << "\n"
-  end
-
-  def bash_completion_caveats
+  def function_completion_caveats(shell)
     return unless keg
-    return unless keg.completion_installed?(:bash)
+    return unless which(shell.to_s, ENV["HOMEBREW_PATH"])
 
-    <<-EOS.undent
-      Bash completion has been installed to:
-        #{HOMEBREW_PREFIX}/etc/bash_completion.d
-    EOS
-  end
+    completion_installed = keg.completion_installed?(shell)
+    functions_installed = keg.functions_installed?(shell)
+    return unless completion_installed || functions_installed
 
-  def zsh_completion_caveats
-    return unless keg
-    return unless keg.completion_installed?(:zsh)
+    installed = []
+    installed << "completions" if completion_installed
+    installed << "functions" if functions_installed
 
-    <<-EOS.undent
-      zsh completion has been installed to:
-        #{HOMEBREW_PREFIX}/share/zsh/site-functions
-    EOS
-  end
+    root_dir = f.keg_only? ? f.opt_prefix : HOMEBREW_PREFIX
 
-  def fish_completion_caveats
-    return unless keg
-    return unless keg.completion_installed?(:fish)
-    return unless which("fish")
-
-    <<-EOS.undent
-      fish completion has been installed to:
-        #{HOMEBREW_PREFIX}/share/fish/vendor_completions.d
-    EOS
-  end
-
-  def python_caveats
-    return unless keg
-    return unless keg.python_site_packages_installed?
-
-    s = nil
-    homebrew_site_packages = Language::Python.homebrew_site_packages
-    user_site_packages = Language::Python.user_site_packages "python"
-    pth_file = user_site_packages/"homebrew.pth"
-    instructions = <<-EOS.undent.gsub(/^/, "  ")
-      mkdir -p #{user_site_packages}
-      echo 'import site; site.addsitedir("#{homebrew_site_packages}")' >> #{pth_file}
-    EOS
-
-    if f.keg_only?
-      keg_site_packages = f.opt_prefix/"lib/python2.7/site-packages"
-      unless Language::Python.in_sys_path?("python", keg_site_packages)
-        s = <<-EOS.undent
-          If you need Python to find bindings for this keg-only formula, run:
-            echo #{keg_site_packages} >> #{homebrew_site_packages/f.name}.pth
-        EOS
-        s += instructions unless Language::Python.reads_brewed_pth_files?("python")
-      end
-      return s
-    end
-
-    return if Language::Python.reads_brewed_pth_files?("python")
-
-    if !Language::Python.in_sys_path?("python", homebrew_site_packages)
-      s = <<-EOS.undent
-        Python modules have been installed and Homebrew's site-packages is not
-        in your Python sys.path, so you will not be able to import the modules
-        this formula installed. If you plan to develop with these modules,
-        please run:
+    case shell
+    when :bash
+      <<~EOS
+        Bash completion has been installed to:
+          #{root_dir}/etc/bash_completion.d
       EOS
-      s += instructions
-    elsif keg.python_pth_files_installed?
-      s = <<-EOS.undent
-        This formula installed .pth files to Homebrew's site-packages and your
-        Python isn't configured to process them, so you will not be able to
-        import the modules this formula installed. If you plan to develop
-        with these modules, please run:
+    when :zsh
+      <<~EOS
+        zsh #{installed.join(" and ")} have been installed to:
+          #{root_dir}/share/zsh/site-functions
       EOS
-      s += instructions
+    when :fish
+      fish_caveats = +"fish #{installed.join(" and ")} have been installed to:"
+      fish_caveats << "\n  #{root_dir}/share/fish/vendor_completions.d" if completion_installed
+      fish_caveats << "\n  #{root_dir}/share/fish/vendor_functions.d" if functions_installed
+      fish_caveats.freeze
     end
-    s
-  end
-
-  def app_caveats
-    return unless keg
-    return unless keg.app_installed?
-
-    <<-EOS.undent
-      .app bundles were installed.
-      Run `brew linkapps #{keg.name}` to symlink these to /Applications.
-    EOS
   end
 
   def elisp_caveats
@@ -161,64 +132,39 @@ class Caveats
     return unless keg
     return unless keg.elisp_installed?
 
-    <<-EOS.undent
+    <<~EOS
       Emacs Lisp files have been installed to:
         #{HOMEBREW_PREFIX}/share/emacs/site-lisp/#{f.name}
     EOS
   end
 
   def plist_caveats
-    s = []
-    if f.plist || (keg && keg.plist_installed?)
-      destination = if f.plist_startup
-        "/Library/LaunchDaemons"
-      else
-        "~/Library/LaunchAgents"
-      end
+    return unless f.plist_manual
 
-      plist_filename = if f.plist
-        f.plist_path.basename
-      else
-        File.basename Dir["#{keg}/*.plist"].first
-      end
-      plist_domain = f.plist_path.basename(".plist")
-      destination_path = Pathname.new File.expand_path destination
-      plist_path = destination_path/plist_filename
+    # Default to brew services not being supported. macOS overrides this behavior.
+    <<~EOS
+      #{Formatter.warning("Warning:")} #{f.name} provides a launchd plist which can only be used on macOS!
+      You can manually execute the service instead with:
+        #{f.plist_manual}
+    EOS
+  end
 
-      # we readlink because this path probably doesn't exist since caveats
-      # occurs before the link step of installation
-      # Yosemite security measures mildly tighter rules:
-      # https://github.com/Homebrew/legacy-homebrew/issues/33815
-      if !plist_path.file? || !plist_path.symlink?
-        if f.plist_startup
-          s << "To have launchd start #{f.full_name} now and restart at startup:"
-          s << "  sudo brew services start #{f.full_name}"
-        else
-          s << "To have launchd start #{f.full_name} now and restart at login:"
-          s << "  brew services start #{f.full_name}"
-        end
-      # For startup plists, we cannot tell whether it's running on launchd,
-      # as it requires for `sudo launchctl list` to get real result.
-      elsif f.plist_startup
-        s << "To restart #{f.full_name} after an upgrade:"
-        s << "  sudo brew services restart #{f.full_name}"
-      elsif Kernel.system "/bin/launchctl list #{plist_domain} &>/dev/null"
-        s << "To restart #{f.full_name} after an upgrade:"
-        s << "  brew services restart #{f.full_name}"
-      else
-        s << "To start #{f.full_name}:"
-        s << "  brew services start #{f.full_name}"
-      end
-
-      if f.plist_manual
-        s << "Or, if you don't want/need a background service you can just run:"
-        s << "  #{f.plist_manual}"
-      end
-
-      if ENV["TMUX"] && !quiet_system("/usr/bin/pbpaste")
-        s << "" << "WARNING: brew services will fail when run under tmux."
-      end
+  def plist_path
+    destination = if f.plist_startup
+      "/Library/LaunchDaemons"
+    else
+      "~/Library/LaunchAgents"
     end
-    s.join("\n") + "\n" unless s.empty?
+
+    plist_filename = if f.plist
+      f.plist_path.basename
+    else
+      File.basename Dir["#{keg}/*.plist"].first
+    end
+    destination_path = Pathname.new(File.expand_path(destination))
+
+    destination_path/plist_filename
   end
 end
+
+require "extend/os/caveats"

@@ -1,39 +1,52 @@
-#:  * `create` <URL> [`--autotools`|`--cmake`] [`--no-fetch`] [`--set-name` <name>] [`--set-version` <version>] [`--tap` <user>`/`<repo>]:
-#:    Generate a formula for the downloadable file at <URL> and open it in the editor.
-#:    Homebrew will attempt to automatically derive the formula name
-#:    and version, but if it fails, you'll have to make your own template. The `wget`
-#:    formula serves as a simple example. For the complete API have a look at
-#:
-#:    <http://www.rubydoc.info/github/Homebrew/brew/master/Formula>
-#:
-#:    If `--autotools` is passed, create a basic template for an Autotools-style build.
-#:    If `--cmake` is passed, create a basic template for a CMake-style build.
-#:
-#:    If `--no-fetch` is passed, Homebrew will not download <URL> to the cache and
-#:    will thus not add the SHA256 to the formula for you.
-#:
-#:    The options `--set-name` and `--set-version` each take an argument and allow
-#:    you to explicitly set the name and version of the package you are creating.
-#:
-#:    The option `--tap` takes a tap as its argument and generates the formula in
-#:    the specified tap.
+# frozen_string_literal: true
 
 require "formula"
-require "blacklist"
-require "digest"
-require "erb"
+require "formula_creator"
+require "missing_formula"
+require "cli/parser"
 
 module Homebrew
+  module_function
+
+  def create_args
+    Homebrew::CLI::Parser.new do
+      usage_banner <<~EOS
+        `create` [<options>] <URL>
+
+        Generate a formula for the downloadable file at <URL> and open it in the editor.
+        Homebrew will attempt to automatically derive the formula name and version, but
+        if it fails, you'll have to make your own template. The `wget` formula serves as
+        a simple example. For the complete API, see:
+        <http://www.rubydoc.info/github/Homebrew/brew/master/Formula>
+      EOS
+      switch "--autotools",
+             description: "Create a basic template for an Autotools-style build."
+      switch "--cmake",
+             description: "Create a basic template for a CMake-style build."
+      switch "--meson",
+             description: "Create a basic template for a Meson-style build."
+      switch "--no-fetch",
+             description: "Homebrew will not download <URL> to the cache and will thus not add the SHA-256 "\
+                          "to the formula for you, nor will it check the GitHub API for GitHub projects "\
+                          "(to fill out its description and homepage)."
+      switch "--HEAD",
+             description: "Indicate that <URL> points to the package's repository rather than a file."
+      flag   "--set-name=",
+             description: "Set the name of the new formula to the provided <name>."
+      flag   "--set-version=",
+             description: "Set the version of the new formula to the provided <version>."
+      flag   "--tap=",
+             description: "Generate the new formula in the provided tap, specified as <user>`/`<repo>."
+      switch :force
+      switch :verbose
+      switch :debug
+      conflicts "--autotools", "--cmake", "--meson"
+    end
+  end
+
   # Create a formula from a tarball URL
   def create
-    # Allow searching MacPorts or Fink.
-    if ARGV.include? "--macports"
-      opoo "`brew create --macports` is deprecated; use `brew search --macports` instead"
-      exec_browser "https://www.macports.org/ports.php?by=name&substr=#{ARGV.next}"
-    elsif ARGV.include? "--fink"
-      opoo "`brew create --fink` is deprecated; use `brew search --fink` instead"
-      exec_browser "http://pdb.finkproject.org/pdb/browse.php?summary=#{ARGV.next}"
-    end
+    create_args.parse
 
     raise UsageError if ARGV.named.empty?
 
@@ -42,21 +55,24 @@ module Homebrew
 
     url = ARGV.named.first # Pull the first (and only) url from ARGV
 
-    version = ARGV.next if ARGV.include? "--set-version"
-    name = ARGV.next if ARGV.include? "--set-name"
-    tap = ARGV.next if ARGV.include? "--tap"
+    version = args.set_version
+    name = args.set_name
+    tap = args.tap
 
     fc = FormulaCreator.new
     fc.name = name
     fc.version = version
     fc.tap = Tap.fetch(tap || "homebrew/core")
     raise TapUnavailableError, tap unless fc.tap.installed?
+
     fc.url = url
 
-    fc.mode = if ARGV.include? "--cmake"
+    fc.mode = if args.cmake?
       :cmake
-    elsif ARGV.include? "--autotools"
+    elsif args.autotools?
       :autotools
+    elsif args.meson?
+      :meson
     end
 
     if fc.name.nil? || fc.name.strip.empty?
@@ -68,18 +84,22 @@ module Homebrew
 
     # Don't allow blacklisted formula, or names that shadow aliases,
     # unless --force is specified.
-    unless ARGV.force?
-      if msg = blacklisted?(fc.name)
-        raise "#{fc.name} is blacklisted for creation.\n#{msg}\nIf you really want to create this formula use --force."
+    unless args.force?
+      if reason = MissingFormula.blacklisted_reason(fc.name)
+        raise <<~EOS
+          #{fc.name} is blacklisted for creation.
+          #{reason}
+          If you really want to create this formula use --force.
+        EOS
       end
 
       if Formula.aliases.include? fc.name
         realname = Formulary.canonical_name(fc.name)
-        raise <<-EOS.undent
+        raise <<~EOS
           The formula #{realname} is already aliased to #{fc.name}
           Please check that you are not creating a duplicate.
           To force creation use --force.
-          EOS
+        EOS
       end
     end
 
@@ -92,127 +112,5 @@ module Homebrew
   def __gets
     gots = $stdin.gets.chomp
     gots.empty? ? nil : gots
-  end
-end
-
-class FormulaCreator
-  attr_reader :url, :sha256
-  attr_accessor :name, :version, :tap, :path, :mode
-
-  def url=(url)
-    @url = url
-    path = Pathname.new(url)
-    if @name.nil?
-      case url
-      when %r{github\.com/\S+/(\S+)\.git}
-        @name = $1
-        @head = true
-      when %r{github\.com/\S+/(\S+)/archive/}
-        @name = $1
-      else
-        @name = path.basename.to_s[/(.*?)[-_.]?#{Regexp.escape(path.version.to_s)}/, 1]
-      end
-    end
-    update_path
-    if @version
-      @version = Version.create(@version)
-    else
-      @version = Pathname.new(url).version
-    end
-  end
-
-  def update_path
-    return if @name.nil? || @tap.nil?
-    @path = Formulary.path "#{@tap}/#{@name}"
-  end
-
-  def fetch?
-    !head? && !ARGV.include?("--no-fetch")
-  end
-
-  def head?
-    @head || ARGV.build_head?
-  end
-
-  def generate!
-    raise "#{path} already exists" if path.exist?
-
-    if version.nil?
-      opoo "Version cannot be determined from URL."
-      puts "You'll need to add an explicit 'version' to the formula."
-    end
-
-    if fetch? && version
-      r = Resource.new
-      r.url(url)
-      r.version(version)
-      r.owner = self
-      @sha256 = r.fetch.sha256 if r.download_strategy == CurlDownloadStrategy
-    end
-
-    path.write ERB.new(template, nil, ">").result(binding)
-  end
-
-  def template; <<-EOS.undent
-    # Documentation: https://github.com/Homebrew/brew/blob/master/docs/Formula-Cookbook.md
-    #                http://www.rubydoc.info/github/Homebrew/brew/master/Formula
-    # PLEASE REMOVE ALL GENERATED COMMENTS BEFORE SUBMITTING YOUR PULL REQUEST!
-
-    class #{Formulary.class_s(name)} < Formula
-      desc ""
-      homepage ""
-    <% if head? %>
-      head "#{url}"
-    <% else %>
-      url "#{url}"
-    <% unless version.nil? or version.detected_from_url? %>
-      version "#{version}"
-    <% end %>
-      sha256 "#{sha256}"
-    <% end %>
-
-    <% if mode == :cmake %>
-      depends_on "cmake" => :build
-    <% elsif mode.nil? %>
-      # depends_on "cmake" => :build
-    <% end %>
-      depends_on :x11 # if your formula requires any X11/XQuartz components
-
-      def install
-        # ENV.deparallelize  # if your formula fails when building in parallel
-
-    <% if mode == :cmake %>
-        system "cmake", ".", *std_cmake_args
-    <% elsif mode == :autotools %>
-        # Remove unrecognized options if warned by configure
-        system "./configure", "--disable-debug",
-                              "--disable-dependency-tracking",
-                              "--disable-silent-rules",
-                              "--prefix=\#{prefix}"
-    <% else %>
-        # Remove unrecognized options if warned by configure
-        system "./configure", "--disable-debug",
-                              "--disable-dependency-tracking",
-                              "--disable-silent-rules",
-                              "--prefix=\#{prefix}"
-        # system "cmake", ".", *std_cmake_args
-    <% end %>
-        system "make", "install" # if this fails, try separate make/make install steps
-      end
-
-      test do
-        # `test do` will create, run in and delete a temporary directory.
-        #
-        # This test will fail and we won't accept that! It's enough to just replace
-        # "false" with the main program this formula installs, but it'd be nice if you
-        # were more thorough. Run the test with `brew test #{name}`. Options passed
-        # to `brew install` such as `--HEAD` also need to be provided to `brew test`.
-        #
-        # The installed folder is not in the path, so use the entire path to any
-        # executables being tested: `system "\#{bin}/program", "do", "something"`.
-        system "false"
-      end
-    end
-    EOS
   end
 end

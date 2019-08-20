@@ -1,15 +1,17 @@
+# frozen_string_literal: true
+
 require "mutex_m"
 require "debrew/irb"
 
 module Debrew
   extend Mutex_m
 
-  Ignorable = Module.new
+  Ignorable = Module.new.freeze
 
   module Raise
     def raise(*)
       super
-    rescue Exception => e
+    rescue Exception => e # rubocop:disable Lint/RescueException
       e.extend(Ignorable)
       super(e) unless Debrew.debug(e) == :ignore
     end
@@ -50,17 +52,17 @@ module Debrew
 
       choice = nil
       while choice.nil?
-        menu.entries.each_with_index { |e, i| puts "#{i+1}. #{e.name}" }
+        menu.entries.each_with_index { |e, i| puts "#{i + 1}. #{e.name}" }
         print menu.prompt unless menu.prompt.nil?
 
         input = $stdin.gets || exit
         input.chomp!
 
         i = input.to_i
-        if i > 0
-          choice = menu.entries[i-1]
+        if i.positive?
+          choice = menu.entries[i - 1]
         else
-          possible = menu.entries.find_all { |e| e.name.start_with?(input) }
+          possible = menu.entries.select { |e| e.name.start_with?(input) }
 
           case possible.size
           when 0 then puts "No such option"
@@ -74,18 +76,13 @@ module Debrew
     end
   end
 
-  class << self
-    alias original_raise raise
-  end
-
   @active = false
   @debugged_exceptions = Set.new
 
-  def self.active?
-    @active
-  end
-
   class << self
+    extend Predicable
+    alias original_raise raise
+    attr_predicate :active?
     attr_reader :debugged_exceptions
   end
 
@@ -97,7 +94,7 @@ module Debrew
       yield
     rescue SystemExit
       original_raise
-    rescue Exception => e
+    rescue Exception => e # rubocop:disable Lint/RescueException
       debug(e)
     ensure
       @active = false
@@ -111,7 +108,7 @@ module Debrew
 
     begin
       puts e.backtrace.first.to_s
-      puts "#{Tty.red}#{e.class.name}#{Tty.reset}: #{e}"
+      puts Formatter.error(e, label: e.class.name)
 
       loop do
         Menu.choose do |menu|

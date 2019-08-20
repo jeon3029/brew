@@ -1,4 +1,4 @@
-require "set"
+# frozen_string_literal: true
 
 class Option
   attr_reader :name, :description, :flag
@@ -15,6 +15,7 @@ class Option
 
   def <=>(other)
     return unless other.is_a?(Option)
+
     name <=> other.name
   end
 
@@ -69,29 +70,29 @@ class Options
     @options.each(*args, &block)
   end
 
-  def <<(o)
-    @options << o
+  def <<(other)
+    @options << other
     self
   end
 
-  def +(o)
-    self.class.new(@options + o)
+  def +(other)
+    self.class.new(@options + other)
   end
 
-  def -(o)
-    self.class.new(@options - o)
+  def -(other)
+    self.class.new(@options - other)
   end
 
-  def &(o)
-    self.class.new(@options & o)
+  def &(other)
+    self.class.new(@options & other)
   end
 
-  def |(o)
-    self.class.new(@options | o)
+  def |(other)
+    self.class.new(@options | other)
   end
 
-  def *(arg)
-    @options.to_a * arg
+  def *(other)
+    @options.to_a * other
   end
 
   def empty?
@@ -114,6 +115,8 @@ class Options
 end
 
 module Homebrew
+  module_function
+
   def dump_options_for_formula(f)
     f.options.sort_by(&:flag).each do |opt|
       puts "#{opt.flag}\n\t#{opt.description}"

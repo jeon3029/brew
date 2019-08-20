@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 require "utils/shell"
 
 module FormulaCellarChecks
@@ -12,17 +14,17 @@ module FormulaCellarChecks
     prefix_bin = prefix_bin.realpath
     return if ORIGINAL_PATHS.include? prefix_bin
 
-    <<-EOS.undent
+    <<~EOS
       #{prefix_bin} is not in your PATH
-      You can amend this by altering your #{Utils::Shell.shell_profile} file
+      You can amend this by altering your #{Utils::Shell.profile} file.
     EOS
   end
 
   def check_manpages
     # Check for man pages that aren't in share/man
-    return unless (formula.prefix+"man").directory?
+    return unless (formula.prefix/"man").directory?
 
-    <<-EOS.undent
+    <<~EOS
       A top-level "man" directory was found
       Homebrew requires that man pages live under share.
       This can often be fixed by passing "--mandir=\#{man}" to configure.
@@ -31,9 +33,9 @@ module FormulaCellarChecks
 
   def check_infopages
     # Check for info pages that aren't in share/info
-    return unless (formula.prefix+"info").directory?
+    return unless (formula.prefix/"info").directory?
 
-    <<-EOS.undent
+    <<~EOS
       A top-level "info" directory was found
       Homebrew suggests that info pages live under share.
       This can often be fixed by passing "--infodir=\#{info}" to configure.
@@ -42,10 +44,11 @@ module FormulaCellarChecks
 
   def check_jars
     return unless formula.lib.directory?
+
     jars = formula.lib.children.select { |g| g.extname == ".jar" }
     return if jars.empty?
 
-    <<-EOS.undent
+    <<~EOS
       JARs were installed to "#{formula.lib}"
       Installing JARs to "lib" can cause conflicts between packages.
       For Java software, it is typically better for the formula to
@@ -56,18 +59,24 @@ module FormulaCellarChecks
     EOS
   end
 
+  VALID_LIBRARY_EXTENSIONS = %w[.a .jnilib .la .o .so .jar .prl .pm .sh].freeze
+
+  def valid_library_extension?(filename)
+    VALID_LIBRARY_EXTENSIONS.include? filename.extname
+  end
+  alias generic_valid_library_extension? valid_library_extension?
+
   def check_non_libraries
     return unless formula.lib.directory?
 
-    valid_extensions = %w[.a .dylib .framework .jnilib .la .o .so
-                          .jar .prl .pm .sh]
-    non_libraries = formula.lib.children.select do |g|
-      next if g.directory?
-      !valid_extensions.include? g.extname
+    non_libraries = formula.lib.children.reject do |g|
+      next true if g.directory?
+
+      valid_library_extension? g
     end
     return if non_libraries.empty?
 
-    <<-EOS.undent
+    <<~EOS
       Non-libraries were installed to "#{formula.lib}"
       Installing non-libraries to "lib" is discouraged.
       The offending files are:
@@ -81,20 +90,21 @@ module FormulaCellarChecks
     non_exes = bin.children.select { |g| g.directory? || !g.executable? }
     return if non_exes.empty?
 
-    <<-EOS.undent
+    <<~EOS
       Non-executables were installed to "#{bin}"
       The offending files are:
-        #{non_exes * "\n        "}
+        #{non_exes * "\n  "}
     EOS
   end
 
   def check_generic_executables(bin)
     return unless bin.directory?
+
     generic_names = %w[run service start stop]
     generics = bin.children.select { |g| generic_names.include? g.basename.to_s }
     return if generics.empty?
 
-    <<-EOS.undent
+    <<~EOS
       Generic binaries were installed to "#{bin}"
       Binaries with generic names are likely to conflict with other software,
       and suggest that this software should be installed to "libexec" and then
@@ -109,11 +119,11 @@ module FormulaCellarChecks
     pth_found = Dir["#{lib}/python{2.7,3}*/site-packages/easy-install.pth"].map { |f| File.dirname(f) }
     return if pth_found.empty?
 
-    <<-EOS.undent
+    <<~EOS
       easy-install.pth files were found
       These .pth files are likely to cause link conflicts. Please invoke
       setup.py using Language::Python.setup_install_args.
-      The offending files are
+      The offending files are:
         #{pth_found * "\n        "}
     EOS
   end
@@ -128,10 +138,11 @@ module FormulaCellarChecks
     end
 
     return unless bad_dir_name
-    <<-EOS
+
+    <<~EOS
       Emacs Lisp files were installed into the wrong site-lisp subdirectory.
       They should be installed into:
-      #{share}/emacs/site-lisp/#{name}
+        #{share}/emacs/site-lisp/#{name}
     EOS
   end
 
@@ -142,11 +153,12 @@ module FormulaCellarChecks
 
     elisps = (share/"emacs/site-lisp").children.select { |file| %w[.el .elc].include? file.extname }
     return if elisps.empty?
-    <<-EOS.undent
+
+    <<~EOS
       Emacs Lisp files were linked directly to #{HOMEBREW_PREFIX}/share/emacs/site-lisp
       This may cause conflicts with other packages.
       They should instead be installed into:
-      #{share}/emacs/site-lisp/#{name}
+        #{share}/emacs/site-lisp/#{name}
 
       The offending files are:
         #{elisps * "\n        "}
@@ -154,17 +166,19 @@ module FormulaCellarChecks
   end
 
   def audit_installed
-    audit_check_output(check_manpages)
-    audit_check_output(check_infopages)
-    audit_check_output(check_jars)
-    audit_check_output(check_non_libraries)
-    audit_check_output(check_non_executables(formula.bin))
-    audit_check_output(check_generic_executables(formula.bin))
-    audit_check_output(check_non_executables(formula.sbin))
-    audit_check_output(check_generic_executables(formula.sbin))
-    audit_check_output(check_easy_install_pth(formula.lib))
-    audit_check_output(check_elisp_dirname(formula.share, formula.name))
-    audit_check_output(check_elisp_root(formula.share, formula.name))
+    @new_formula ||= false
+
+    problem_if_output(check_manpages)
+    problem_if_output(check_infopages)
+    problem_if_output(check_jars)
+    problem_if_output(check_non_libraries) if @new_formula
+    problem_if_output(check_non_executables(formula.bin))
+    problem_if_output(check_generic_executables(formula.bin))
+    problem_if_output(check_non_executables(formula.sbin))
+    problem_if_output(check_generic_executables(formula.sbin))
+    problem_if_output(check_easy_install_pth(formula.lib))
+    problem_if_output(check_elisp_dirname(formula.share, formula.name))
+    problem_if_output(check_elisp_root(formula.share, formula.name))
   end
   alias generic_audit_installed audit_installed
 

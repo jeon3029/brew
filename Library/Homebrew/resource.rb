@@ -1,7 +1,9 @@
+# frozen_string_literal: true
+
 require "download_strategy"
 require "checksum"
 require "version"
-require "forwardable"
+require "mktemp"
 
 # Resource is the fundamental representation of an external resource. The
 # primary formula download, along with other declared resources, are instances
@@ -9,35 +11,13 @@ require "forwardable"
 class Resource
   include FileUtils
 
-  attr_reader :mirrors, :specs, :using, :source_modified_time
+  attr_reader :mirrors, :specs, :using, :source_modified_time, :patches, :owner
   attr_writer :version
   attr_accessor :download_strategy, :checksum
 
   # Formula name must be set after the DSL, as we have no access to the
   # formula name before initialization of the formula
-  attr_accessor :name, :owner
-
-  class Download
-    def initialize(resource)
-      @resource = resource
-    end
-
-    def url
-      @resource.url
-    end
-
-    def specs
-      @resource.specs
-    end
-
-    def version
-      @resource.version
-    end
-
-    def mirrors
-      @resource.mirrors
-    end
-  end
+  attr_accessor :name
 
   def initialize(name = nil, &block)
     @name = name
@@ -47,11 +27,18 @@ class Resource
     @specs = {}
     @checksum = nil
     @using = nil
+    @patches = []
     instance_eval(&block) if block_given?
   end
 
+  def owner=(owner)
+    @owner = owner
+    patches.each { |p| p.owner = owner }
+  end
+
   def downloader
-    download_strategy.new(download_name, Download.new(self))
+    @downloader ||= download_strategy.new(url, download_name, version,
+                                          mirrors: mirrors.dup, **specs)
   end
 
   # Removes /s from resource names; this allows go package names
@@ -62,7 +49,10 @@ class Resource
   end
 
   def download_name
-    name.nil? ? owner.name : "#{owner.name}--#{escaped_name}"
+    return owner.name if name.nil?
+    return escaped_name if owner.nil?
+
+    "#{owner.name}--#{escaped_name}"
   end
 
   def cached_download
@@ -73,31 +63,43 @@ class Resource
     downloader.clear_cache
   end
 
-  # Verifies download and unpacks it
+  # Verifies download and unpacks it.
   # The block may call `|resource,staging| staging.retain!` to retain the staging
   # directory. Subclasses that override stage should implement the tmp
-  # dir using FileUtils.mktemp so that works with all subtypes.
+  # dir using {Mktemp} so that works with all subtypes.
   def stage(target = nil, &block)
-    unless target || block
-      raise ArgumentError, "target directory or block is required"
-    end
+    raise ArgumentError, "target directory or block is required" unless target || block
 
-    verify_download_integrity(fetch)
+    fetch
+    prepare_patches
     unpack(target, &block)
   end
 
+  def prepare_patches
+    patches.grep(DATAPatch) { |p| p.path = owner.owner.path }
+    patches.select(&:external?).each(&:fetch)
+  end
+
+  def apply_patches
+    return if patches.empty?
+
+    ohai "Patching #{name}"
+    patches.each(&:apply)
+  end
+
   # If a target is given, unpack there; else unpack to a temp folder.
-  # If block is given, yield to that block with |stage|, where stage
-  # is a ResourceStagingContext.
+  # If block is given, yield to that block with `|stage|`, where stage
+  # is a {ResourceStageContext}.
   # A target or a block must be given, but not both.
   def unpack(target = nil)
     mktemp(download_name) do |staging|
       downloader.stage
       @source_modified_time = downloader.source_modified_time
+      apply_patches
       if block_given?
         yield ResourceStageContext.new(self, staging)
       elsif target
-        target = Pathname.new(target) unless target.is_a? Pathname
+        target = Pathname(target)
         target.install Pathname.pwd.children
       end
     end
@@ -109,7 +111,7 @@ class Resource
     Partial.new(self, files)
   end
 
-  def fetch
+  def fetch(verify_download_integrity: true)
     HOMEBREW_CACHE.mkpath
 
     begin
@@ -118,7 +120,9 @@ class Resource
       raise DownloadError.new(self, e)
     end
 
-    cached_download
+    download = cached_download
+    verify_download_integrity(download) if verify_download_integrity
+    download
   end
 
   def verify_download_integrity(fn)
@@ -129,15 +133,16 @@ class Resource
   rescue ChecksumMissingError
     opoo "Cannot verify integrity of #{fn.basename}"
     puts "A checksum was not provided for this resource"
-    puts "For your reference the SHA256 is: #{fn.sha256}"
+    puts "For your reference the SHA-256 is: #{fn.sha256}"
   end
 
   Checksum::TYPES.each do |type|
     define_method(type) { |val| @checksum = Checksum.new(type, val) }
   end
 
-  def url(val = nil, specs = {})
+  def url(val = nil, **specs)
     return @url if val.nil?
+
     @url = val
     @specs.merge!(specs)
     @using = @specs.delete(:using)
@@ -145,17 +150,33 @@ class Resource
   end
 
   def version(val = nil)
-    @version ||= detect_version(val)
+    @version ||= begin
+      version = detect_version(val)
+      version.null? ? nil : version
+    end
   end
 
   def mirror(val)
     mirrors << val
   end
 
+  def patch(strip = :p1, src = nil, &block)
+    p = Patch.create(strip, src, &block)
+    patches << p
+  end
+
+  protected
+
+  def mktemp(prefix)
+    Mktemp.new(prefix).run do |staging|
+      yield staging
+    end
+  end
+
   private
 
   def detect_version(val)
-    return if val.nil? && url.nil?
+    return Version::NULL if val.nil? && url.nil?
 
     case val
     when nil     then Version.detect(url, specs)
@@ -172,7 +193,7 @@ class Resource
     end
   end
 
-  class Patch < Resource
+  class PatchResource < Resource
     attr_reader :patch_files
 
     def initialize(&block)
@@ -188,15 +209,15 @@ class Resource
   end
 end
 
-# The context in which a Resource.stage() occurs. Supports access to both
-# the Resource and associated Mktemp in a single block argument. The interface
-# is back-compatible with Resource itself as used in that context.
+# The context in which a {Resource.stage} occurs. Supports access to both
+# the {Resource} and associated {Mktemp} in a single block argument. The interface
+# is back-compatible with {Resource} itself as used in that context.
 class ResourceStageContext
   extend Forwardable
 
-  # The Resource that is being staged
+  # The {Resource} that is being staged
   attr_reader :resource
-  # The Mktemp in which @resource is staged
+  # The {Mktemp} in which {#resource} is staged
   attr_reader :staging
 
   def_delegators :@resource, :version, :url, :mirrors, :specs, :using, :source_modified_time

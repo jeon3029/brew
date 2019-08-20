@@ -1,12 +1,28 @@
-#:  * `--version`:
-#:    Print the version number of Homebrew to standard output and exit.
+# frozen_string_literal: true
+
+require "cli/parser"
 
 module Homebrew
+  module_function
+
+  def __version_args
+    Homebrew::CLI::Parser.new do
+      usage_banner <<~EOS
+        `--version`
+
+        Print the version number of Homebrew, Homebrew/homebrew-core and Homebrew/homebrew-cask
+        (if tapped) to standard output and exit.
+      EOS
+    end
+  end
+
   def __version
-    # As a special case, `--version` is implemented directly in `brew.rb`. This
-    # file merely serves as a container for the documentation. It also catches
-    # the case where running `brew --version` with additional arguments would
-    # produce a rather cryptic message about a non-existent `--version` command.
-    raise UsageError
+    __version_args.parse
+
+    odie "This command does not take arguments." if ARGV.any?
+
+    puts "Homebrew #{HOMEBREW_VERSION}"
+    puts "#{CoreTap.instance.full_name} #{CoreTap.instance.version_string}"
+    puts "#{Tap.default_cask_tap.full_name} #{Tap.default_cask_tap.version_string}" if Tap.default_cask_tap.installed?
   end
 end

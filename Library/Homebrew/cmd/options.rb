@@ -1,24 +1,40 @@
-#:  * `options` [`--compact`] (`--all`|`--installed`|<formulae>):
-#:    Display install options specific to <formulae>.
-#:
-#:    If `--compact` is passed, show all options on a single line separated by
-#:    spaces.
-#:
-#:    If `--all` is passed, show options for all formulae.
-#:
-#:    If `--installed` is passed, show options for all installed formulae.
+# frozen_string_literal: true
 
 require "formula"
 require "options"
+require "cli/parser"
 
 module Homebrew
+  module_function
+
+  def options_args
+    Homebrew::CLI::Parser.new do
+      usage_banner <<~EOS
+        `options` [<options>] <formula>
+
+        Display install options specific to <formula>
+      EOS
+      switch "--compact",
+             description: "Show all options on a single line separated by spaces."
+      switch "--all",
+             description: "Show options for all formulae."
+      switch "--installed",
+             description: "Show options for all installed formulae."
+      switch :debug
+      conflicts "--all", "--installed"
+    end
+  end
+
   def options
-    if ARGV.include? "--all"
-      puts_options Formula.to_a
-    elsif ARGV.include? "--installed"
-      puts_options Formula.installed
+    options_args.parse
+
+    if args.all?
+      puts_options Formula.to_a.sort
+    elsif args.installed?
+      puts_options Formula.installed.sort
     else
-      raise FormulaUnspecifiedError if ARGV.named.empty?
+      raise FormulaUnspecifiedError if args.remaining.empty?
+
       puts_options ARGV.formulae
     end
   end
@@ -26,7 +42,8 @@ module Homebrew
   def puts_options(formulae)
     formulae.each do |f|
       next if f.options.empty?
-      if ARGV.include? "--compact"
+
+      if args.compact?
         puts f.options.as_flags.sort * " "
       else
         puts f.full_name if formulae.length > 1

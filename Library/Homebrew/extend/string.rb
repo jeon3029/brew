@@ -1,37 +1,26 @@
+# frozen_string_literal: true
+
+# Contains backports from newer versions of Ruby
+require "backports/2.4.0/string/match"
+require "backports/2.5.0/string/delete_prefix"
+require "active_support/core_ext/object/blank"
+
 class String
-  def undent
-    gsub(/^[ \t]{#{(slice(/^[ \t]+/) || '').length}}/, "")
-  end
-
-  # eg:
-  #   if foo then <<-EOS.undent_________________________________________________________72
-  #               Lorem ipsum dolor sit amet, consectetur adipisicing elit, sed do
-  #               eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad
-  #               minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip
-  #               ex ea commodo consequat. Duis aute irure dolor in reprehenderit in
-  #               voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur
-  #               sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt
-  #               mollit anim id est laborum.
-  #               EOS
-  alias undent_________________________________________________________72 undent
-
   # String.chomp, but if result is empty: returns nil instead.
   # Allows `chuzzle || foo` short-circuits.
+  # TODO: Deprecate.
   def chuzzle
     s = chomp
     s unless s.empty?
   end
-
-  def strip_prefix(prefix)
-    start_with?(prefix) ? self[prefix.length..-1] : self
-  end
 end
 
 class NilClass
+  # TODO: Deprecate.
   def chuzzle; end
 end
 
-# used by the inreplace function (in utils.rb)
+# Used by the inreplace function (in `utils.rb`).
 module StringInreplaceExtension
   attr_accessor :errors
 
@@ -41,25 +30,22 @@ module StringInreplaceExtension
 
   def sub!(before, after)
     result = super
-    unless result
-      errors << "expected replacement of #{before.inspect} with #{after.inspect}"
-    end
+    errors << "expected replacement of #{before.inspect} with #{after.inspect}" unless result
     result
   end
 
   # Warn if nothing was replaced
   def gsub!(before, after, audit_result = true)
     result = super(before, after)
-    if audit_result && result.nil?
-      errors << "expected replacement of #{before.inspect} with #{after.inspect}"
-    end
+    errors << "expected replacement of #{before.inspect} with #{after.inspect}" if audit_result && result.nil?
     result
   end
 
-  # Looks for Makefile style variable defintions and replaces the
+  # Looks for Makefile style variable definitions and replaces the
   # value with "new_value", or removes the definition entirely.
   def change_make_var!(flag, new_value)
     return if gsub!(/^#{Regexp.escape(flag)}[ \t]*=[ \t]*(.*)$/, "#{flag}=#{new_value}", false)
+
     errors << "expected to change #{flag.inspect} to #{new_value.inspect}"
   end
 
@@ -67,9 +53,7 @@ module StringInreplaceExtension
   def remove_make_var!(flags)
     Array(flags).each do |flag|
       # Also remove trailing \n, if present.
-      unless gsub!(/^#{Regexp.escape(flag)}[ \t]*=.*$\n?/, "", false)
-        errors << "expected to remove #{flag.inspect}"
-      end
+      errors << "expected to remove #{flag.inspect}" unless gsub!(/^#{Regexp.escape(flag)}[ \t]*=.*$\n?/, "", false)
     end
   end
 

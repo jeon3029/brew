@@ -1,7 +1,13 @@
-require "vendor/macho/macho"
+# frozen_string_literal: true
+
+require "macho"
 require "os/mac/architecture_list"
 
-module MachO
+module MachOShim
+  extend Forwardable
+
+  delegate [:dylib_id, :rpaths, :delete_rpath] => :macho
+
   # @private
   def macho
     @macho ||= begin
@@ -43,20 +49,17 @@ module MachO
       []
     rescue
       # ... but complain about other (parse) errors for further investigation.
-      if ARGV.homebrew_developer?
-        onoe "Failed to read Mach-O binary: #{self}"
-        raise
-      end
+      onoe "Failed to read Mach-O binary: #{self}"
+      raise if ARGV.homebrew_developer?
+
       []
     end
   end
 
-  def dynamically_linked_libraries
-    macho.linked_dylibs
-  end
+  def dynamically_linked_libraries(except: :none)
+    lcs = macho.dylib_load_commands.reject { |lc| lc.type == except }
 
-  def dylib_id
-    macho.dylib_id
+    lcs.map(&:name).map(&:to_s).uniq
   end
 
   def archs
@@ -100,6 +103,8 @@ module MachO
   def mach_o_executable?
     mach_data.any? { |m| m.fetch(:type) == :executable }
   end
+
+  alias binary_executable? mach_o_executable?
 
   # @private
   def mach_o_bundle?

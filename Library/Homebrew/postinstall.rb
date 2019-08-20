@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 old_trap = trap("INT") { exit! 130 }
 
 require "global"
@@ -14,8 +16,8 @@ begin
   formula = ARGV.resolved_formulae.first
   formula.extend(Debrew::Formula) if ARGV.debug?
   formula.run_post_install
-rescue Exception => e
-  Marshal.dump(e, error_pipe)
+rescue Exception => e # rubocop:disable Lint/RescueException
+  error_pipe.puts e.to_json
   error_pipe.close
   exit! 1
 end

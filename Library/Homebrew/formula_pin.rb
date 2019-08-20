@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 require "keg"
 
 class FormulaPin
@@ -11,7 +13,7 @@ class FormulaPin
 
   def pin_at(version)
     HOMEBREW_PINNED_KEGS.mkpath
-    version_path = @f.rack.join(version)
+    version_path = @f.rack/version
     path.make_relative_symlink(version_path) unless pinned? || !version_path.exist?
   end
 

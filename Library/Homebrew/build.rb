@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 # This script is loaded by formula_installer as a separate instance.
 # Thrown exceptions are propagated back to the parent process over a pipe
 
@@ -32,6 +34,7 @@ class Build
     # Only allow Homebrew-approved directories into the PATH, unless
     # a formula opts-in to allowing the user's path.
     return unless formula.env.userpaths? || reqs.any? { |rq| rq.env.userpaths? }
+
     ENV.userpaths!
   end
 
@@ -44,12 +47,9 @@ class Build
   def expand_reqs
     formula.recursive_requirements do |dependent, req|
       build = effective_build_options_for(dependent)
-      if (req.optional? || req.recommended?) && build.without?(req)
+      if req.prune_from_option?(build)
         Requirement.prune
-      elsif req.build? && dependent != formula
-        Requirement.prune
-      elsif req.satisfied? && req.default_formula? && (dep = req.to_dependency).installed?
-        deps << dep
+      elsif req.prune_if_build_and_not_dependent?(dependent, formula)
         Requirement.prune
       end
     end
@@ -58,9 +58,9 @@ class Build
   def expand_deps
     formula.recursive_dependencies do |dependent, dep|
       build = effective_build_options_for(dependent)
-      if (dep.optional? || dep.recommended?) && build.without?(dep)
+      if dep.prune_from_option?(build)
         Dependency.prune
-      elsif dep.build? && dependent != formula
+      elsif dep.prune_if_build_and_not_dependent?(dependent, formula)
         Dependency.prune
       elsif dep.build?
         Dependency.keep_but_prune_recursive_deps
@@ -71,6 +71,7 @@ class Build
   def install
     formula_deps = deps.map(&:to_formula)
     keg_only_deps = formula_deps.select(&:keg_only?)
+    run_time_deps = deps.reject(&:build?).map(&:to_formula)
 
     formula_deps.each do |dep|
       fixopt(dep) unless dep.opt_prefix.directory?
@@ -81,6 +82,7 @@ class Build
     if superenv?
       ENV.keg_only_deps = keg_only_deps
       ENV.deps = formula_deps
+      ENV.run_time_deps = run_time_deps
       ENV.x11 = reqs.any? { |rq| rq.is_a?(X11Requirement) }
       ENV.setup_build_environment(formula)
       post_superenv_hacks
@@ -102,51 +104,56 @@ class Build
       end
     end
 
-    old_tmpdir = ENV["TMPDIR"]
-    old_temp = ENV["TEMP"]
-    old_tmp = ENV["TMP"]
-    ENV["TMPDIR"] = ENV["TEMP"] = ENV["TMP"] = HOMEBREW_TEMP
+    new_env = {
+      "TMPDIR" => HOMEBREW_TEMP,
+      "TEMP"   => HOMEBREW_TEMP,
+      "TMP"    => HOMEBREW_TEMP,
+    }
 
-    formula.extend(Debrew::Formula) if ARGV.debug?
+    with_env(new_env) do
+      formula.extend(Debrew::Formula) if ARGV.debug?
 
-    formula.brew do |_formula, staging|
-      staging.retain! if ARGV.keep_tmp?
-      formula.patch
+      formula.brew do |_formula, staging|
+        # For head builds, HOMEBREW_FORMULA_PREFIX should include the commit,
+        # which is not known until after the formula has been staged.
+        ENV["HOMEBREW_FORMULA_PREFIX"] = formula.prefix
 
-      if ARGV.git?
-        system "git", "init"
-        system "git", "add", "-A"
-      end
-      if ARGV.interactive?
-        ohai "Entering interactive mode"
-        puts "Type `exit' to return and finalize the installation"
-        puts "Install to this prefix: #{formula.prefix}"
+        staging.retain! if ARGV.keep_tmp?
+        formula.patch
 
         if ARGV.git?
-          puts "This directory is now a git repo. Make your changes and then use:"
-          puts "  git diff | pbcopy"
-          puts "to copy the diff to the clipboard."
+          system "git", "init"
+          system "git", "add", "-A"
         end
+        if ARGV.interactive?
+          ohai "Entering interactive mode"
+          puts "Type `exit` to return and finalize the installation"
+          puts "Install to this prefix: #{formula.prefix}"
 
-        interactive_shell(formula)
-      else
-        formula.prefix.mkpath
+          if ARGV.git?
+            puts "This directory is now a git repo. Make your changes and then use:"
+            puts "  git diff | pbcopy"
+            puts "to copy the diff to the clipboard."
+          end
 
-        formula.install
+          interactive_shell(formula)
+        else
+          formula.prefix.mkpath
 
-        stdlibs = detect_stdlibs(ENV.compiler)
-        tab = Tab.create(formula, ENV.compiler, stdlibs.first)
-        tab.write
+          (formula.logs/"00.options.out").write \
+            "#{formula.full_name} #{formula.build.used_options.sort.join(" ")}".strip
+          formula.install
 
-        # Find and link metafiles
-        formula.prefix.install_metafiles formula.buildpath
-        formula.prefix.install_metafiles formula.libexec if formula.libexec.exist?
+          stdlibs = detect_stdlibs(ENV.compiler)
+          tab = Tab.create(formula, ENV.compiler, stdlibs.first)
+          tab.write
+
+          # Find and link metafiles
+          formula.prefix.install_metafiles formula.buildpath
+          formula.prefix.install_metafiles formula.libexec if formula.libexec.exist?
+        end
       end
     end
-  ensure
-    ENV["TMPDIR"] = old_tmpdir
-    ENV["TEMP"] = old_temp
-    ENV["TMP"] = old_tmp
   end
 
   def detect_stdlibs(compiler)
@@ -170,7 +177,7 @@ class Build
       raise
     end
     Keg.new(path).optlink
-  rescue StandardError
+  rescue
     raise "#{f.opt_prefix} not present or broken\nPlease reinstall #{f.full_name}. Sorry :("
   end
 end
@@ -185,8 +192,25 @@ begin
   options = Options.create(ARGV.flags_only)
   build   = Build.new(formula, options)
   build.install
-rescue Exception => e
-  Marshal.dump(e, error_pipe)
+rescue Exception => e # rubocop:disable Lint/RescueException
+  error_hash = JSON.parse e.to_json
+
+  # Special case: need to recreate BuildErrors in full
+  # for proper analytics reporting and error messages.
+  # BuildErrors are specific to build processes and not other
+  # children, which is why we create the necessary state here
+  # and not in Utils.safe_fork.
+  if error_hash["json_class"] == "BuildError"
+    error_hash["cmd"] = e.cmd
+    error_hash["args"] = e.args
+    error_hash["env"] = e.env
+  elsif error_hash["json_class"] == "ErrorDuringExecution"
+    error_hash["cmd"] = e.cmd
+    error_hash["status"] = e.status.exitstatus
+    error_hash["output"] = e.output
+  end
+
+  error_pipe.puts error_hash.to_json
   error_pipe.close
   exit! 1
 end

@@ -1,36 +1,51 @@
-require "pathname"
+# frozen_string_literal: true
+
 require "resource"
 require "metafiles"
-require "utils"
 
 module DiskUsageExtension
   def disk_usage
     return @disk_usage if @disk_usage
+
     compute_disk_usage
     @disk_usage
   end
 
   def file_count
     return @file_count if @file_count
+
     compute_disk_usage
     @file_count
   end
 
   def abv
-    out = ""
+    out = +""
     compute_disk_usage
     out << "#{number_readable(@file_count)} files, " if @file_count > 1
     out << disk_usage_readable(@disk_usage).to_s
+    out.freeze
   end
 
   private
 
   def compute_disk_usage
-    if directory?
+    if symlink? && !exist?
+      @file_count = 1
+      @disk_usage = 0
+      return
+    end
+
+    path = if symlink?
+      resolved_path
+    else
+      self
+    end
+
+    if path.directory?
       scanned_files = Set.new
       @file_count = 0
       @disk_usage = 0
-      find do |f|
+      path.find do |f|
         if f.directory?
           @disk_usage += f.lstat.size
         else
@@ -47,18 +62,18 @@ module DiskUsageExtension
       end
     else
       @file_count = 1
-      @disk_usage = lstat.size
+      @disk_usage = path.lstat.size
     end
   end
 end
 
 # Homebrew extends Ruby's `Pathname` to make our code more readable.
-# @see http://ruby-doc.org/stdlib-1.8.7/libdoc/pathname/rdoc/Pathname.html  Ruby's Pathname API
+# @see https://ruby-doc.org/stdlib-1.8.7/libdoc/pathname/rdoc/Pathname.html Ruby's Pathname API
 class Pathname
   include DiskUsageExtension
 
   # @private
-  BOTTLE_EXTNAME_RX = /(\.[a-z0-9_]+\.bottle\.(\d+\.)?tar\.gz)$/
+  BOTTLE_EXTNAME_RX = /(\.[a-z0-9_]+\.bottle\.(\d+\.)?tar\.gz)$/.freeze
 
   # Moves a file from the original location to the {Pathname}'s.
   def install(*sources)
@@ -123,21 +138,21 @@ class Pathname
   end
 
   def install_symlink_p(src, new_basename)
-    src = Pathname(src).expand_path(self)
-    dst = join(new_basename)
     mkpath
-    FileUtils.ln_sf(src.relative_path_from(dst.parent), dst)
+    dstdir = realpath
+    src = Pathname(src).expand_path(dstdir)
+    src = src.dirname.realpath/src.basename if src.dirname.exist?
+    FileUtils.ln_sf(src.relative_path_from(dstdir), dstdir/new_basename)
   end
   private :install_symlink_p
 
-  if method_defined?(:write)
-    # @private
-    alias old_write write
-  end
+  # @private
+  alias old_write write
 
-  # we assume this pathname object is a file obviously
+  # We assume this pathname object is a file, obviously
   def write(content, *open_args)
     raise "Will not overwrite #{self}" if exist?
+
     dirname.mkpath
     open("w", *open_args) { |f| f.write(content) }
   end
@@ -145,54 +160,38 @@ class Pathname
   # Only appends to a file that is already created.
   def append_lines(content, *open_args)
     raise "Cannot append file that doesn't exist: #{self}" unless exist?
+
     open("a", *open_args) { |f| f.puts(content) }
   end
 
-  def binwrite(contents, *open_args)
-    open("wb", *open_args) { |f| f.write(contents) }
-  end unless method_defined?(:binwrite)
-
-  def binread(*open_args)
-    open("rb", *open_args, &:read)
-  end unless method_defined?(:binread)
-
-  # NOTE always overwrites
+  # NOTE: This always overwrites.
   def atomic_write(content)
-    require "tempfile"
-    tf = Tempfile.new(basename.to_s, dirname)
+    old_stat = stat if exist?
+    File.atomic_write(self) do |file|
+      file.write(content)
+    end
+
+    return unless old_stat
+
+    # Try to restore original file's permissions separately
+    # atomic_write does it itself, but it actually erases
+    # them if chown fails
     begin
-      tf.binmode
-      tf.write(content)
-
-      begin
-        old_stat = stat
-      rescue Errno::ENOENT
-        old_stat = default_stat
-      end
-
-      uid = Process.uid
-      gid = Process.groups.delete(old_stat.gid) { Process.gid }
-
-      begin
-        tf.chown(uid, gid)
-        tf.chmod(old_stat.mode)
-      rescue Errno::EPERM
-      end
-
-      File.rename(tf.path, self)
-    ensure
-      tf.close!
+      # Set correct permissions on new file
+      chown(old_stat.uid, nil)
+      chown(nil, old_stat.gid)
+    rescue Errno::EPERM, Errno::EACCES
+      # Changing file ownership failed, moving on.
+      nil
+    end
+    begin
+      # This operation will affect filesystem ACL's
+      chmod(old_stat.mode)
+    rescue Errno::EPERM, Errno::EACCES
+      # Changing file permissions failed, moving on.
+      nil
     end
   end
-
-  def default_stat
-    sentinel = parent.join(".brew.#{Process.pid}.#{rand(Time.now.to_i)}")
-    sentinel.open("w") {}
-    sentinel.stat
-  ensure
-    sentinel.unlink
-  end
-  private :default_stat
 
   # @private
   def cp_path_sub(pattern, replacement)
@@ -214,16 +213,23 @@ class Pathname
   # @private
   alias extname_old extname
 
-  # extended to support common double extensions
+  # Extended to support common double extensions
   def extname(path = to_s)
-    bottle_ext = path[BOTTLE_EXTNAME_RX, 1]
+    basename = File.basename(path)
+
+    bottle_ext = basename[BOTTLE_EXTNAME_RX, 1]
     return bottle_ext if bottle_ext
-    archive_ext = path[/(\.(tar|cpio|pax)\.(gz|bz2|lz|xz|Z))$/, 1]
+
+    archive_ext = basename[/(\.(tar|cpio|pax)\.(gz|bz2|lz|xz|Z))\Z/, 1]
     return archive_ext if archive_ext
-    File.extname(path)
+
+    # Don't treat version numbers as extname.
+    return "" if basename.match?(/\b\d+\.\d+[^\.]*\Z/) && !basename.end_with?(".7z")
+
+    File.extname(basename)
   end
 
-  # for filetypes we support, basename without extension
+  # For filetypes we support, basename without extension
   def stem
     File.basename((path = to_s), extname(path))
   end
@@ -236,13 +242,13 @@ class Pathname
     rmdir
     true
   rescue Errno::ENOTEMPTY
-    if (ds_store = self+".DS_Store").exist? && children.length == 1
+    if (ds_store = join(".DS_Store")).exist? && children.length == 1
       ds_store.unlink
       retry
     else
       false
     end
-  rescue Errno::EACCES, Errno::ENOENT
+  rescue Errno::EACCES, Errno::ENOENT, Errno::EBUSY
     false
   end
 
@@ -253,79 +259,26 @@ class Pathname
   end
 
   # @private
-  def compression_type
-    case extname
-    when ".jar", ".war"
-      # Don't treat jars or wars as compressed
-      return
-    when ".gz"
-      # If the filename ends with .gz not preceded by .tar
-      # then we want to gunzip but not tar
-      return :gzip_only
-    when ".bz2"
-      return :bzip2_only
-    when ".lha", ".lzh"
-      return :lha
-    end
-
-    # Get enough of the file to detect common file types
-    # POSIX tar magic has a 257 byte offset
-    # magic numbers stolen from /usr/share/file/magic/
-    case open("rb") { |f| f.read(262) }
-    when /^PK\003\004/n         then :zip
-    when /^\037\213/n           then :gzip
-    when /^BZh/n                then :bzip2
-    when /^\037\235/n           then :compress
-    when /^.{257}ustar/n        then :tar
-    when /^\xFD7zXZ\x00/n       then :xz
-    when /^LZIP/n               then :lzip
-    when /^Rar!/n               then :rar
-    when /^7z\xBC\xAF\x27\x1C/n then :p7zip
-    when /^xar!/n               then :xar
-    when /^\xed\xab\xee\xdb/n   then :rpm
-    else
-      # This code so that bad-tarballs and zips produce good error messages
-      # when they don't unarchive properly.
-      case extname
-      when ".tar.gz", ".tgz", ".tar.bz2", ".tbz" then :tar
-      when ".zip" then :zip
-      end
-    end
-  end
-
-  # @private
   def text_executable?
     /^#!\s*\S+/ =~ open("r") { |f| f.read(1024) }
   end
 
-  # @private
-  def incremental_hash(klass)
-    digest = klass.new
-    if digest.respond_to?(:file)
-      digest.file(self)
-    else
-      buf = ""
-      open("rb") { |f| digest << buf while f.read(16384, buf) }
-    end
-    digest.hexdigest
-  end
-
   def sha256
     require "digest/sha2"
-    incremental_hash(Digest::SHA2)
+    Digest::SHA256.file(self).hexdigest
   end
 
   def verify_checksum(expected)
     raise ChecksumMissingError if expected.nil? || expected.empty?
+
     actual = Checksum.new(expected.hash_type, send(expected.hash_type).downcase)
     raise ChecksumMismatchError.new(self, expected, actual) unless expected == actual
   end
 
-  # FIXME: eliminate the places where we rely on this method
-  alias to_str to_s unless method_defined?(:to_str)
+  alias to_str to_s
 
   def cd
-    Dir.chdir(self) { yield }
+    Dir.chdir(self) { yield self }
   end
 
   def subdirs
@@ -334,7 +287,7 @@ class Pathname
 
   # @private
   def resolved_path
-    symlink? ? dirname+readlink : self
+    symlink? ? dirname.join(readlink) : self
   end
 
   # @private
@@ -344,7 +297,7 @@ class Pathname
     # The link target contains NUL bytes
     false
   else
-    (dirname+link).exist?
+    dirname.join(link).exist?
   end
 
   # @private
@@ -353,20 +306,12 @@ class Pathname
     File.symlink(src.relative_path_from(dirname), self)
   end
 
-  def /(other)
-    unless other.respond_to?(:to_str) || other.respond_to?(:to_path)
-      opoo "Pathname#/ called on #{inspect} with #{other.inspect} as an argument"
-      puts "This behavior is deprecated, please pass either a String or a Pathname"
-    end
-    self + other.to_s
-  end unless method_defined?(:/)
-
   # @private
   def ensure_writable
     saved_perms = nil
     unless writable_real?
       saved_perms = stat.mode
-      chmod 0644
+      FileUtils.chmod "u+rw", to_path
     end
     yield
   ensure
@@ -393,22 +338,22 @@ class Pathname
     mkpath
     targets.each do |target|
       target = Pathname.new(target) # allow pathnames or strings
-      (self+target.basename).write <<-EOS.undent
+      join(target.basename).write <<~SH
         #!/bin/bash
         exec "#{target}" "$@"
-      EOS
+      SH
     end
   end
 
   # Writes an exec script that sets environment variables
   def write_env_script(target, env)
-    env_export = ""
-    env.each { |key, value| env_export += "#{key}=\"#{value}\" " }
+    env_export = +""
+    env.each { |key, value| env_export << "#{key}=\"#{value}\" " }
     dirname.mkpath
-    write <<-EOS.undent
-    #!/bin/bash
-    #{env_export}exec "#{target}" "$@"
-    EOS
+    write <<~SH
+      #!/bin/bash
+      #{env_export}exec "#{target}" "$@"
+    SH
   end
 
   # Writes a wrapper env script and moves all files to the dst
@@ -416,33 +361,41 @@ class Pathname
     dst.mkpath
     Pathname.glob("#{self}/*") do |file|
       next if file.directory?
+
       dst.install(file)
-      new_file = dst+file.basename
+      new_file = dst.join(file.basename)
       file.write_env_script(new_file, env)
     end
   end
 
-  # Writes an exec script that invokes a java jar
-  def write_jar_script(target_jar, script_name, java_opts = "")
+  # Writes an exec script that invokes a Java jar
+  def write_jar_script(target_jar, script_name, java_opts = "", java_version: nil)
     mkpath
-    (self+script_name).write <<-EOS.undent
+    java_home = ("JAVA_HOME=\"#{Language::Java.java_home_shell(java_version)}\" " if java_version)
+    join(script_name).write <<~SH
       #!/bin/bash
-      exec java #{java_opts} -jar #{target_jar} "$@"
-    EOS
+      #{java_home}exec java #{java_opts} -jar #{target_jar} "$@"
+    SH
   end
 
   def install_metafiles(from = Pathname.pwd)
     Pathname(from).children.each do |p|
       next if p.directory?
       next unless Metafiles.copy?(p.basename.to_s)
+
       # Some software symlinks these files (see help2man.rb)
       filename = p.resolved_path
       # Some software links metafiles together, so by the time we iterate to one of them
       # we may have already moved it. libxml2's COPYING and Copyright are affected by this.
       next unless filename.exist?
+
       filename.chmod 0644
       install(filename)
     end
+  end
+
+  def ds_store?
+    basename.to_s == ".DS_Store"
   end
 
   # https://bugs.ruby-lang.org/issues/9915
@@ -453,7 +406,21 @@ class Pathname
       end
     }
   end
+
+  def binary_executable?
+    false
+  end
+
+  def mach_o_bundle?
+    false
+  end
+
+  def dylib?
+    false
+  end
 end
+
+require "extend/os/pathname"
 
 # @private
 module ObserverPathnameExtension
@@ -476,7 +443,7 @@ module ObserverPathnameExtension
     MAXIMUM_VERBOSE_OUTPUT = 100
 
     def verbose?
-      return ARGV.verbose? unless ENV["TRAVIS"]
+      return ARGV.verbose? unless ENV["CI"]
       return false unless ARGV.verbose?
 
       if total < MAXIMUM_VERBOSE_OUTPUT

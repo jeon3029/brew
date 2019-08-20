@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 class Module
   def attr_rw(*attrs)
     file, line, = caller.first.split(":")
@@ -6,7 +8,9 @@ class Module
     attrs.each do |attr|
       module_eval <<-EOS, file, line
         def #{attr}(val=nil)
-          val.nil? ? @#{attr} : @#{attr} = val
+          @#{attr} ||= nil
+          return @#{attr} if val.nil?
+          @#{attr} = val
         end
       EOS
     end

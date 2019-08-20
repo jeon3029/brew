@@ -1,12 +1,24 @@
+# frozen_string_literal: true
+
 require "erb"
 
 module Utils
   module Analytics
     class << self
+      def custom_prefix_label
+        "custom-prefix"
+      end
+
+      def clear_os_prefix_ci
+        return unless instance_variable_defined?(:@os_prefix_ci)
+
+        remove_instance_variable(:@os_prefix_ci)
+      end
+
       def os_prefix_ci
-        @anonymous_os_prefix_ci ||= begin
+        @os_prefix_ci ||= begin
           os = OS_VERSION
-          prefix = ", non-/usr/local" if HOMEBREW_PREFIX.to_s != "/usr/local"
+          prefix = ", #{custom_prefix_label}" unless Homebrew.default_prefix?
           ci = ", CI" if ENV["CI"]
           "#{os}#{prefix}#{ci}"
         end
@@ -15,7 +27,12 @@ module Utils
       def report(type, metadata = {})
         return if ENV["HOMEBREW_NO_ANALYTICS"] || ENV["HOMEBREW_NO_ANALYTICS_THIS_RUN"]
 
-        args = %W[
+        args = []
+
+        # do not load .curlrc unless requested (must be the first argument)
+        args << "-q" unless ENV["HOMEBREW_CURLRC"]
+
+        args += %W[
           --max-time 3
           --user-agent #{HOMEBREW_USER_AGENT_CURL}
           --data v=1
@@ -29,25 +46,26 @@ module Utils
         metadata.each do |key, value|
           next unless key
           next unless value
+
           key = ERB::Util.url_encode key
           value = ERB::Util.url_encode value
           args << "--data" << "#{key}=#{value}"
         end
 
         # Send analytics. Don't send or store any personally identifiable information.
-        # https://github.com/Homebrew/brew/blob/master/docs/Analytics.md
+        # https://docs.brew.sh/Analytics
         # https://developers.google.com/analytics/devguides/collection/protocol/v1/devguide
         # https://developers.google.com/analytics/devguides/collection/protocol/v1/parameters
         if ENV["HOMEBREW_ANALYTICS_DEBUG"]
           url = "https://www.google-analytics.com/debug/collect"
-          puts "#{ENV["HOMEBREW_CURL"]} #{url} #{args.join(" ")}"
-          puts Utils.popen_read ENV["HOMEBREW_CURL"], url, *args
+          puts "#{ENV["HOMEBREW_CURL"]} #{args.join(" ")} #{url}"
+          puts Utils.popen_read ENV["HOMEBREW_CURL"], *args, url
         else
           pid = fork do
             exec ENV["HOMEBREW_CURL"],
-              "https://www.google-analytics.com/collect",
-              "--silent", "--output", "/dev/null",
-              *args
+                 *args,
+                 "--silent", "--output", "/dev/null",
+                 "https://www.google-analytics.com/collect"
           end
           Process.detach pid
         end
@@ -55,27 +73,25 @@ module Utils
 
       def report_event(category, action, label = os_prefix_ci, value = nil)
         report(:event,
-          ec: category,
-          ea: action,
-          el: label,
-          ev: value)
+               ec: category,
+               ea: action,
+               el: label,
+               ev: value)
       end
 
-      def report_exception(exception, options = {})
-        if exception.is_a?(BuildError) &&
-           exception.formula.tap && !exception.formula.tap.private?
-          report_event("BuildError", exception.formula.full_name)
+      def report_build_error(exception)
+        return unless exception.formula.tap
+        return unless exception.formula.tap.installed?
+        return if exception.formula.tap.private?
+
+        action = exception.formula.full_name
+        if (options = exception.options&.to_a&.join(" "))
+          action = "#{action} #{options}".strip
         end
-
-        fatal = options.fetch(:fatal, true) ? "1" : "0"
-        report(:exception,
-          exd: exception.class.name,
-          exf: fatal)
-      end
-
-      def report_screenview(screen_name)
-        report(:screenview, cd: screen_name)
+        report_event("BuildError", action)
       end
     end
   end
 end
+
+require "extend/os/analytics"

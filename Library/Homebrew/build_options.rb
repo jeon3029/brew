@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 class BuildOptions
   # @private
   def initialize(args, options)
@@ -47,7 +49,6 @@ class BuildOptions
   def bottle?
     include? "build-bottle"
   end
-  alias build_bottle? bottle?
 
   # True if a {Formula} is being built with {Formula.head} instead of {Formula.stable}.
   # <pre>args << "--some-new-stuff" if build.head?</pre>
@@ -66,7 +67,8 @@ class BuildOptions
     include? "devel"
   end
 
-  # True if a {Formula} is being built with {Formula.stable} instead of {Formula.devel} or {Formula.head}. This is the default.
+  # True if a {Formula} is being built with {Formula.stable} instead of {Formula.devel}
+  # or {Formula.head}. This is the default.
   # <pre>args << "--some-beta" if build.devel?</pre>
   def stable?
     !(head? || devel?)
@@ -84,11 +86,9 @@ class BuildOptions
     include?("c++11") && option_defined?("c++11")
   end
 
-  # True if a {Formula} is being built in 32-bit/x86 mode.
-  # This is needed for some use-cases though we prefer to build Universal
-  # when a 32-bit version is needed.
-  def build_32_bit?
-    include?("32-bit") && option_defined?("32-bit")
+  # True if the build has any arguments or options specified.
+  def any_args_or_options?
+    !@args.empty? || !@options.empty?
   end
 
   # @private

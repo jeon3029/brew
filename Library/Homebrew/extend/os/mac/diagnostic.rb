@@ -1,34 +1,53 @@
+# frozen_string_literal: true
+
 module Homebrew
   module Diagnostic
     class Checks
-      def development_tools_checks
+      undef fatal_build_from_source_checks, supported_configuration_checks,
+            build_from_source_checks
+
+      def fatal_build_from_source_checks
         %w[
-          check_for_unsupported_macos
-          check_for_prerelease_xcode
-          check_for_bad_install_name_tool
-          check_for_installed_developer_tools
           check_xcode_license_approved
-          check_for_osx_gcc_installer
-          check_xcode_8_without_clt_on_el_capitan
-        ]
+          check_xcode_minimum_version
+          check_clt_minimum_version
+          check_if_xcode_needs_clt_installed
+        ].freeze
       end
 
-      def fatal_development_tools_checks
-        if MacOS.version >= :sierra && ENV["CI"].nil?
-          %w[
-            check_xcode_up_to_date
-            check_clt_up_to_date
-          ]
-        else
-          %w[
-          ]
-        end
+      def supported_configuration_checks
+        %w[
+          check_for_unsupported_macos
+        ].freeze
+      end
+
+      def build_from_source_checks
+        %w[
+          check_for_installed_developer_tools
+          check_xcode_up_to_date
+          check_clt_up_to_date
+        ].freeze
+      end
+
+      def check_for_non_prefixed_findutils
+        findutils = Formula["findutils"]
+        return unless findutils.any_version_installed?
+
+        gnubin = %W[#{findutils.opt_libexec}/gnubin #{findutils.libexec}/gnubin]
+        default_names = Tab.for_name("findutils").with? "default-names"
+        return if !default_names && (paths & gnubin).empty?
+
+        <<~EOS
+          Putting non-prefixed findutils in your path can cause python builds to fail.
+        EOS
+      rescue FormulaUnavailableError
+        nil
       end
 
       def check_for_unsupported_macos
         return if ARGV.homebrew_developer?
 
-        who = "We"
+        who = +"We"
         if OS::Mac.prerelease?
           what = "pre-release version"
         elsif OS::Mac.outdated_release?
@@ -37,42 +56,33 @@ module Homebrew
         else
           return
         end
+        who.freeze
 
-        <<-EOS.undent
+        <<~EOS
           You are using macOS #{MacOS.version}.
           #{who} do not provide support for this #{what}.
-          You may encounter build failures or other breakages.
-          Please create pull-requests instead of filing issues.
-        EOS
-      end
-
-      def check_for_prerelease_xcode
-        return if ARGV.homebrew_developer?
-        # Running a pre-release Xcode on a pre-release OS is expected
-        # and likely to cause less problems than a stable Xcode will.
-        return if OS::Mac.prerelease?
-        return unless MacOS::Xcode.installed?
-        return unless MacOS::Xcode.prerelease?
-
-        <<-EOS.undent
-          You are using a pre-release version of Xcode.
-          You may encounter build failures or other breakages.
-          Please create pull-requests instead of filing issues.
+          #{please_create_pull_requests(what)}
         EOS
       end
 
       def check_xcode_up_to_date
-        return unless MacOS::Xcode.installed? && MacOS::Xcode.outdated?
+        return unless MacOS::Xcode.outdated?
 
-        message = <<-EOS.undent
-          Your Xcode (#{MacOS::Xcode.version}) is outdated
-          Please update to Xcode #{MacOS::Xcode.latest_version}.
+        # CI images are going to end up outdated so don't complain when
+        # `brew test-bot` runs `brew doctor` in the CI for the Homebrew/brew
+        # repository. This only needs to support whatever CI providers
+        # Homebrew/brew is currently using.
+        return if ENV["HOMEBREW_AZURE_PIPELINES"] || ENV["HOMEBREW_GITHUB_ACTIONS"]
+
+        message = <<~EOS
+          Your Xcode (#{MacOS::Xcode.version}) is outdated.
+          Please update to Xcode #{MacOS::Xcode.latest_version} (or delete it).
           #{MacOS::Xcode.update_instructions}
         EOS
 
         if OS::Mac.prerelease?
           current_path = Utils.popen_read("/usr/bin/xcode-select", "-p")
-          message += <<-EOS.undent
+          message += <<~EOS
             If #{MacOS::Xcode.latest_version} is installed, you may need to:
               sudo xcode-select --switch /Applications/Xcode.app
             Current developer directory is:
@@ -83,98 +93,57 @@ module Homebrew
       end
 
       def check_clt_up_to_date
-        return unless MacOS::CLT.installed? && MacOS::CLT.outdated?
+        return unless MacOS::CLT.outdated?
 
-        <<-EOS.undent
+        # CI images are going to end up outdated so don't complain when
+        # `brew test-bot` runs `brew doctor` in the CI for the Homebrew/brew
+        # repository. This only needs to support whatever CI providers
+        # Homebrew/brew is currently using.
+        return if ENV["HOMEBREW_AZURE_PIPELINES"] || ENV["HOMEBREW_GITHUB_ACTIONS"]
+
+        <<~EOS
           A newer Command Line Tools release is available.
           #{MacOS::CLT.update_instructions}
         EOS
       end
 
-      def check_xcode_8_without_clt_on_el_capitan
-        return unless MacOS::Xcode.without_clt?
-        # Scope this to Xcode 8 on El Cap for now
-        return unless MacOS.version == :el_capitan && MacOS::Xcode.version >= "8"
+      def check_xcode_minimum_version
+        return unless MacOS::Xcode.below_minimum_version?
 
-        <<-EOS.undent
-          You have Xcode 8 installed without the CLT;
-          this causes certain builds to fail on OS X El Capitan (10.11).
-          Please install the CLT via:
-            sudo xcode-select --install
+        xcode = MacOS::Xcode.version.to_s
+        xcode += " => #{MacOS::Xcode.prefix}" unless MacOS::Xcode.default_prefix?
+
+        <<~EOS
+          Your Xcode (#{xcode}) is too outdated.
+          Please update to Xcode #{MacOS::Xcode.latest_version} (or delete it).
+          #{MacOS::Xcode.update_instructions}
         EOS
       end
 
-      def check_for_osx_gcc_installer
-        return unless MacOS.version < "10.7" || ((MacOS::Xcode.version || "0") > "4.1")
-        return unless DevelopmentTools.clang_version == "2.1"
+      def check_clt_minimum_version
+        return unless MacOS::CLT.below_minimum_version?
 
-        fix_advice = if MacOS.version >= :mavericks
-          "Please run `xcode-select --install` to install the CLT."
-        elsif MacOS.version >= :lion
-          "Please install the CLT or Xcode #{MacOS::Xcode.latest_version}."
-        else
-          "Please install Xcode #{MacOS::Xcode.latest_version}."
-        end
-
-        <<-EOS.undent
-          You seem to have osx-gcc-installer installed.
-          Homebrew doesn't support osx-gcc-installer. It causes many builds to fail and
-          is an unlicensed distribution of really old Xcode files.
-          #{fix_advice}
+        <<~EOS
+          Your Command Line Tools are too outdated.
+          #{MacOS::CLT.update_instructions}
         EOS
       end
 
-      def check_for_stray_developer_directory
-        # if the uninstaller script isn't there, it's a good guess neither are
-        # any troublesome leftover Xcode files
-        uninstaller = Pathname.new("/Developer/Library/uninstall-developer-folder")
-        return unless ((MacOS::Xcode.version || "0") >= "4.3") && uninstaller.exist?
+      def check_if_xcode_needs_clt_installed
+        return unless MacOS::Xcode.needs_clt_installed?
 
-        <<-EOS.undent
-          You have leftover files from an older version of Xcode.
-          You should delete them using:
-            #{uninstaller}
-        EOS
-      end
-
-      def check_for_bad_install_name_tool
-        return if MacOS.version < "10.9"
-
-        libs = Pathname.new("/usr/bin/install_name_tool").dynamically_linked_libraries
-
-        # otool may not work, for example if the Xcode license hasn't been accepted yet
-        return if libs.empty?
-        return if libs.include? "/usr/lib/libxcselect.dylib"
-
-        <<-EOS.undent
-          You have an outdated version of /usr/bin/install_name_tool installed.
-          This will cause binary package installations to fail.
-          This can happen if you install osx-gcc-installer or RailsInstaller.
-          To restore it, you must reinstall macOS or restore the binary from
-          the OS packages.
-        EOS
-      end
-
-      def check_for_other_package_managers
-        ponk = MacOS.macports_or_fink
-        return if ponk.empty?
-
-        <<-EOS.undent
-          You have MacPorts or Fink installed:
-            #{ponk.join(", ")}
-
-          This can cause trouble. You don't have to uninstall them, but you may want to
-          temporarily move them out of the way, e.g.
-
-            sudo mv /opt/local ~/macports
+        <<~EOS
+          Xcode alone is not sufficient on #{MacOS.version.pretty_name}.
+          #{DevelopmentTools.installation_instructions}
         EOS
       end
 
       def check_ruby_version
-        ruby_version = MacOS.version >= "10.9" ? "2.0" : "1.8"
-        return if RUBY_VERSION[/\d\.\d/] == ruby_version
+        ruby_version = "2.3.7"
+        return if RUBY_VERSION == ruby_version
+        return if ARGV.homebrew_developer? && OS::Mac.prerelease?
 
-        <<-EOS.undent
+        <<~EOS
           Ruby version #{RUBY_VERSION} is unsupported on #{MacOS.version}. Homebrew
           is developed and tested on Ruby #{ruby_version}, and may not work correctly
           on other Rubies. Patches are accepted as long as they don't cause breakage
@@ -187,7 +156,7 @@ module Homebrew
         return if prefix.nil?
         return unless prefix.to_s.include?(" ")
 
-        <<-EOS.undent
+        <<~EOS
           Xcode is installed to a directory with a space in the name.
           This will cause some formulae to fail to build.
         EOS
@@ -197,7 +166,7 @@ module Homebrew
         prefix = MacOS::Xcode.prefix
         return if prefix.nil? || prefix.exist?
 
-        <<-EOS.undent
+        <<~EOS
           The directory Xcode is reportedly installed to doesn't exist:
             #{prefix}
           You may need to `xcode-select` the proper path if you have moved Xcode.
@@ -206,80 +175,174 @@ module Homebrew
 
       def check_xcode_select_path
         return if MacOS::CLT.installed?
+        return unless MacOS::Xcode.installed?
         return if File.file?("#{MacOS.active_developer_dir}/usr/bin/xcodebuild")
 
         path = MacOS::Xcode.bundle_path
         path = "/Developer" if path.nil? || !path.directory?
-        <<-EOS.undent
+        <<~EOS
           Your Xcode is configured with an invalid path.
           You should change it to the correct path:
             sudo xcode-select -switch #{path}
         EOS
       end
 
-      def check_for_bad_curl
-        return unless MacOS.version <= "10.8"
-        return if Formula["curl"].installed?
-
-        <<-EOS.undent
-          The system curl on 10.8 and below is often incapable of supporting
-          modern secure connections & will fail on fetching formulae.
-
-          We recommend you:
-            brew install curl
-        EOS
-      end
-
-      def check_for_unsupported_curl_vars
-        # Support for SSL_CERT_DIR seemed to be removed in the 10.10.5 update.
-        return unless MacOS.version >= :yosemite
-        return if ENV["SSL_CERT_DIR"].nil?
-
-        <<-EOS.undent
-          SSL_CERT_DIR support was removed from Apple's curl.
-          If fetching formulae fails you should:
-            unset SSL_CERT_DIR
-          and remove it from #{Utils::Shell.shell_profile} if present.
-        EOS
-      end
-
       def check_xcode_license_approved
         # If the user installs Xcode-only, they have to approve the
         # license or no "xc*" tool will work.
-        return unless `/usr/bin/xcrun clang 2>&1` =~ /license/ && !$?.success?
+        return unless `/usr/bin/xcrun clang 2>&1` =~ /license/ && !$CHILD_STATUS.success?
 
-        <<-EOS.undent
+        <<~EOS
           You have not agreed to the Xcode license.
-          Builds will fail! Agree to the license by opening Xcode.app or running:
+          Agree to the license by opening Xcode.app or running:
             sudo xcodebuild -license
         EOS
       end
 
-      def check_for_latest_xquartz
-        return unless MacOS::XQuartz.version
-        return if MacOS::XQuartz.provided_by_apple?
+      def check_xquartz_up_to_date
+        return unless MacOS::XQuartz.outdated?
 
-        installed_version = Version.create(MacOS::XQuartz.version)
-        latest_version = Version.create(MacOS::XQuartz.latest_version)
-        return if installed_version >= latest_version
-
-        <<-EOS.undent
-          Your XQuartz (#{installed_version}) is outdated
-          Please install XQuartz #{latest_version}:
-            https://xquartz.macosforge.org
+        <<~EOS
+          Your XQuartz (#{MacOS::XQuartz.version}) is outdated.
+          Please install XQuartz #{MacOS::XQuartz.latest_version} (or delete the current version).
+          XQuartz can be updated using Homebrew Cask by running:
+            brew cask reinstall xquartz
         EOS
       end
 
-      def check_for_beta_xquartz
-        return unless MacOS::XQuartz.version
-        return unless MacOS::XQuartz.version.include? "beta"
+      def check_filesystem_case_sensitive
+        dirs_to_check = [
+          HOMEBREW_PREFIX,
+          HOMEBREW_REPOSITORY,
+          HOMEBREW_CELLAR,
+          HOMEBREW_TEMP,
+        ]
+        case_sensitive_dirs = dirs_to_check.select do |dir|
+          # We select the dir as being case-sensitive if either the UPCASED or the
+          # downcased variant is missing.
+          # Of course, on a case-insensitive fs, both exist because the os reports so.
+          # In the rare situation when the user has indeed a downcased and an upcased
+          # dir (e.g. /TMP and /tmp) this check falsely thinks it is case-insensitive
+          # but we don't care because: 1. there is more than one dir checked, 2. the
+          # check is not vital and 3. we would have to touch files otherwise.
+          upcased = Pathname.new(dir.to_s.upcase)
+          downcased = Pathname.new(dir.to_s.downcase)
+          dir.exist? && !(upcased.exist? && downcased.exist?)
+        end
+        return if case_sensitive_dirs.empty?
 
-        <<-EOS.undent
-          The following beta release of XQuartz is installed: #{MacOS::XQuartz.version}
+        volumes = Volumes.new
+        case_sensitive_vols = case_sensitive_dirs.map do |case_sensitive_dir|
+          volumes.get_mounts(case_sensitive_dir)
+        end
+        case_sensitive_vols.uniq!
 
-          XQuartz beta releases include address sanitization, and do not work with
-          all software; notably, wine will not work with beta releases of XQuartz.
-          We recommend only installing stable releases of XQuartz.
+        <<~EOS
+          The filesystem on #{case_sensitive_vols.join(",")} appears to be case-sensitive.
+          The default macOS filesystem is case-insensitive. Please report any apparent problems.
+        EOS
+      end
+
+      def check_for_gettext
+        find_relative_paths("lib/libgettextlib.dylib",
+                            "lib/libintl.dylib",
+                            "include/libintl.h")
+        return if @found.empty?
+
+        # Our gettext formula will be caught by check_linked_keg_only_brews
+        gettext = begin
+          Formulary.factory("gettext")
+        rescue
+          nil
+        end
+
+        if gettext&.linked_keg&.directory?
+          homebrew_owned = @found.all? do |path|
+            Pathname.new(path).realpath.to_s.start_with? "#{HOMEBREW_CELLAR}/gettext"
+          end
+          return if homebrew_owned
+        end
+
+        inject_file_list @found, <<~EOS
+          gettext files detected at a system prefix.
+          These files can cause compilation and link failures, especially if they
+          are compiled with improper architectures. Consider removing these files:
+        EOS
+      end
+
+      def check_for_iconv
+        find_relative_paths("lib/libiconv.dylib", "include/iconv.h")
+        return if @found.empty?
+
+        libiconv = begin
+          Formulary.factory("libiconv")
+        rescue
+          nil
+        end
+        if libiconv&.linked_keg&.directory?
+          unless libiconv.keg_only?
+            <<~EOS
+              A libiconv formula is installed and linked.
+              This will break stuff. For serious. Unlink it.
+            EOS
+          end
+        else
+          inject_file_list @found, <<~EOS
+            libiconv files detected at a system prefix other than /usr.
+            Homebrew doesn't provide a libiconv formula, and expects to link against
+            the system version in /usr. libiconv in other prefixes can cause
+            compile or link failure, especially if compiled with improper
+            architectures. macOS itself never installs anything to /usr/local so
+            it was either installed by a user or some other third party software.
+
+            tl;dr: delete these files:
+          EOS
+        end
+      end
+
+      def check_for_bitdefender
+        if !Pathname("/Library/Bitdefender/AVP/EndpointSecurityforMac.app").exist? &&
+           !Pathname("/Library/Bitdefender/AVP/BDLDaemon").exist?
+          return
+        end
+
+        <<~EOS
+          You have installed Bitdefender. The "Traffic Scan" option interferes with
+          Homebrew's ability to download packages. See:
+            #{Formatter.url("https://github.com/Homebrew/brew/issues/5558")}
+        EOS
+      end
+
+      def check_for_multiple_volumes
+        return unless HOMEBREW_CELLAR.exist?
+
+        volumes = Volumes.new
+
+        # Find the volumes for the TMP folder & HOMEBREW_CELLAR
+        real_cellar = HOMEBREW_CELLAR.realpath
+        where_cellar = volumes.which real_cellar
+
+        begin
+          tmp = Pathname.new(Dir.mktmpdir("doctor", HOMEBREW_TEMP))
+          begin
+            real_tmp = tmp.realpath.parent
+            where_tmp = volumes.which real_tmp
+          ensure
+            Dir.delete tmp
+          end
+        rescue
+          return
+        end
+
+        return if where_cellar == where_tmp
+
+        <<~EOS
+          Your Cellar and TEMP directories are on different volumes.
+          macOS won't move relative symlinks across volumes unless the target file already
+          exists. Brews known to be affected by this are Git and Narwhal.
+
+          You should set the "HOMEBREW_TEMP" environment variable to a suitable
+          directory on the same volume as your Cellar.
         EOS
       end
     end

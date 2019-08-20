@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 require "tab"
 require "extend/ARGV"
 
@@ -5,11 +7,12 @@ module Utils
   class Bottles
     class << self
       def tag
-        @bottle_tag ||= "#{ENV["HOMEBREW_SYSTEM"]}_#{ENV["HOMEBREW_PROCESSOR"]}".downcase.to_sym
+        @tag ||= "#{ENV["HOMEBREW_PROCESSOR"]}_#{ENV["HOMEBREW_SYSTEM"]}".downcase.to_sym
       end
 
       def built_as?(f)
         return false unless f.installed?
+
         tab = Tab.for_keg(f.installed_prefix)
         tab.built_as_bottle
       end
@@ -29,9 +32,12 @@ module Utils
       end
 
       def receipt_path(bottle_file)
-        Utils.popen_read("tar", "-tzf", bottle_file).lines.map(&:chomp).find do |line|
+        path = Utils.popen_read("tar", "-tzf", bottle_file).lines.map(&:chomp).find do |line|
           line =~ %r{.+/.+/INSTALL_RECEIPT.json}
         end
+        raise "This bottle does not contain the file INSTALL_RECEIPT.json: #{bottle_file}" unless path
+
+        path
       end
 
       def resolve_formula_names(bottle_file)
@@ -50,7 +56,17 @@ module Utils
       end
 
       def resolve_version(bottle_file)
-        PkgVersion.parse receipt_path(bottle_file).split("/")[1]
+        PkgVersion.parse receipt_path(bottle_file).split("/").second
+      end
+
+      def formula_contents(bottle_file,
+                           name: resolve_formula_names(bottle_file)[0])
+        bottle_version = resolve_version bottle_file
+        formula_path = "#{name}/#{bottle_version}/.brew/#{name}.rb"
+        contents = Utils.popen_read "tar", "-xOzf", bottle_file, formula_path
+        raise BottleFormulaUnavailableError.new(bottle_file, formula_path) unless $CHILD_STATUS.success?
+
+        contents
       end
     end
 

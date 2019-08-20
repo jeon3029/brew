@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 module InstallRenamed
   def install_p(_, new_basename)
     super do |src, dst|
@@ -16,12 +18,12 @@ module InstallRenamed
     end
   end
 
-  def +(path)
-    super(path).extend(InstallRenamed)
+  def +(other)
+    super(other).extend(InstallRenamed)
   end
 
-  def /(path)
-    super(path).extend(InstallRenamed)
+  def /(other)
+    super(other).extend(InstallRenamed)
   end
 
   private

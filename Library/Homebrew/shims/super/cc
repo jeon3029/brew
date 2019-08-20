@@ -1,20 +1,30 @@
 #!/bin/sh
 # Make sure this shim uses the same Ruby interpreter that is used by Homebrew.
-unset RUBYLIB
-unset RUBYOPT
 if [ -z "$HOMEBREW_RUBY_PATH" ]
 then
   echo "${0##*/}: The build tool has reset ENV; --env=std required." >&2
   exit 1
 fi
-exec "$HOMEBREW_RUBY_PATH" -x "$0" "$@"
+exec "$HOMEBREW_RUBY_PATH" --enable-frozen-string-literal --disable=gems,did_you_mean,rubyopt -x "$0" "$@"
 #!/usr/bin/env ruby -W0
 
 require "pathname"
 require "set"
 
+def mac?
+  RUBY_PLATFORM[/darwin/]
+end
+
+def high_sierra_or_later?
+  mac? && ENV["HOMEBREW_MACOS_VERSION_NUMERIC"].to_s.to_i >= 101300
+end
+
+def linux?
+  RUBY_PLATFORM[/linux/]
+end
+
 class Cmd
-  attr_reader :config, :prefix, :cellar, :opt, :tmpdir, :sysroot, :deps
+  attr_reader :config, :prefix, :cellar, :opt, :cachedir, :tmpdir, :sysroot, :deps
   attr_reader :archflags, :optflags, :keg_regex, :formula_prefix
 
   def initialize(arg0, args)
@@ -23,6 +33,7 @@ class Cmd
     @config = ENV.fetch("HOMEBREW_CCCFG") { "" }
     @prefix = ENV["HOMEBREW_PREFIX"]
     @cellar = ENV["HOMEBREW_CELLAR"]
+    @cachedir = ENV["HOMEBREW_CACHE"]
     @opt = ENV["HOMEBREW_OPT"]
     @tmpdir = ENV["HOMEBREW_TEMP"]
     @sysroot = ENV["HOMEBREW_SDKROOT"]
@@ -31,18 +42,22 @@ class Cmd
     @deps = Set.new(ENV.fetch("HOMEBREW_DEPENDENCIES") { "" }.split(","))
     @formula_prefix = ENV["HOMEBREW_FORMULA_PREFIX"]
     # matches opt or cellar prefix and formula name
-    @keg_regex = %r[(#{Regexp.escape(opt)}|#{Regexp.escape(cellar)})/([\w\-_\+]+)]
+    @keg_regex = %r[(#{Regexp.escape(opt)}|#{Regexp.escape(cellar)})/([\w+-.@]+)]
   end
 
   def mode
-    if @arg0 == "cpp" || @arg0 == "ld"
-      @arg0.to_sym
+    if @arg0 == "cpp"
+      :cpp
+    elsif ["ld", "ld.gold", "gold"].include? @arg0
+      :ld
     elsif @args.include? "-c"
       if @arg0 =~ /(?:c|g|clang)\+\+/
         :cxx
       else
         :cc
       end
+    elsif @args.include?("-xc++-header") || @args.each_cons(2).include?(["-x", "c++-header"])
+      :cxx
     elsif @args.include? "-E"
       :ccE
     else
@@ -57,20 +72,27 @@ class Cmd
   def tool
     @tool ||= case @arg0
     when "ld" then "ld"
+    when "gold", "ld.gold" then "ld.gold"
     when "cpp" then "cpp"
+    when /llvm_(clang(\+\+)?)/
+     "#{ENV["HOMEBREW_PREFIX"]}/opt/llvm/bin/#{$1}"
     when /\w\+\+(-\d(\.\d)?)?$/
       case ENV["HOMEBREW_CC"]
       when /clang/
         "clang++"
       when /llvm-gcc/
         "llvm-g++-4.2"
-      when /gcc(-\d(\.\d)?)?$/
-        "g++" + $1.to_s
+      when /(g)?cc(-\d(\.\d)?)?$/
+        "g++" + $2.to_s
       end
     else
       # Note that this is a universal fallback, so that we'll always invoke
       # HOMEBREW_CC regardless of what name under which the tool was invoked.
-      ENV["HOMEBREW_CC"]
+      if ENV["HOMEBREW_CC"] == "llvm_clang"
+        "#{ENV["HOMEBREW_PREFIX"]}/opt/llvm/bin/clang"
+      else
+        ENV["HOMEBREW_CC"]
+      end
     end
   end
 
@@ -160,15 +182,23 @@ class Cmd
       "-fcaller-saves", "-fthread-jumps", "-fno-reorder-blocks", "-fcse-skip-blocks",
       "-frerun-cse-after-loop", "-frerun-loop-opt", "-fcse-follow-jumps",
       "-fno-regmove", "-fno-for-scope", "-fno-tree-pre", "-fno-tree-dominator-opts",
-      "-fuse-linker-plugin"
+      "-fuse-linker-plugin", "-frounding-math"
       # clang doesn't support these flags
       args << arg unless tool =~ /^clang/
+    when "-Xpreprocessor"
+      # used for -Xpreprocessor -fopenmp
+      args << arg << enum.next
+    when /-mmacosx-version-min=10\.(\d+)/
+      arg = "-mmacosx-version-min=10.9" if high_sierra_or_later? && $1.to_i < 9
+      args << arg
     when "--fast-math"
       arg = "-ffast-math" if tool =~ /^clang/
       args << arg
     when "-Wno-deprecated-register"
       # older gccs don't support these flags
       args << arg unless tool =~ /^g..-4.[02]/
+    when /^-Wl,-z,defs/
+      # -Wl,-undefined,error is already the default
     when /^-W[alp],/, /^-Wno-/
       args << arg
     when /^-W.*/
@@ -180,9 +210,13 @@ class Cmd
     when "-undefineddynamic_lookup"
       args << "-Wl,-undefined,dynamic_lookup"
     when /^-isysroot/, /^--sysroot/
-      sdk = enum.next
-      # We set the sysroot for macOS SDKs
-      args << "-isysroot" << sdk unless sdk.downcase.include? "osx"
+      if mac?
+        sdk = enum.next
+        # We set the sysroot for macOS SDKs
+        args << "-isysroot" << sdk unless sdk.downcase.include? "osx"
+      else
+        args << arg << enum.next
+      end
     when "-dylib"
       args << "-Wl,#{arg}"
     when /^-I(.+)?/
@@ -202,10 +236,6 @@ class Cmd
   end
 
   def keep?(path)
-    # The logic in this method will eventually become the default,
-    # but is currently opt-in.
-    return keep_orig?(path) unless ENV["HOMEBREW_EXPERIMENTAL_FILTER_FLAGS_ON_DEPS"]
-
     # Allow references to self
     if formula_prefix && path.start_with?("#{formula_prefix}/")
       true
@@ -214,17 +244,16 @@ class Cmd
     elsif path.start_with?(cellar) || path.start_with?(opt)
       dep = path[keg_regex, 2]
       dep && @deps.include?(dep)
-    elsif path.start_with?(prefix)
+    elsif path.start_with?(prefix, cachedir, tmpdir)
+      true
+    elsif path.start_with?("/opt/local", "/opt/boxen/homebrew", "/opt/X11", "/sw", "/usr/X11")
+      # ignore MacPorts, Boxen's Homebrew, X11, fink
+      false
+    elsif mac?
       true
     else
-      # ignore MacPorts, Boxen's Homebrew, X11, fink
-      !path.start_with?("/opt/local", "/opt/boxen/homebrew", "/opt/X11", "/sw", "/usr/X11")
+      false
     end
-  end
-
-  # The original less-smart version of keep_orig; will eventually be removed
-  def keep_orig?(path)
-    path.start_with?(prefix, cellar, tmpdir) || !path.start_with?("/opt/local", "/opt/boxen/homebrew", "/opt/X11", "/sw", "/usr/X11")
   end
 
   def cflags
@@ -253,8 +282,7 @@ class Cmd
     path_flags("-isystem", isystem_paths) + path_flags("-I", include_paths)
   end
 
-  def ldflags
-    args = path_flags("-L", library_paths)
+  def ldflags_mac(args)
     case mode
     when :ld
       args << "-headerpad_max_install_names"
@@ -264,6 +292,27 @@ class Cmd
       args << "-Wl,-no_weak_imports" if no_weak_imports?
     end
     args
+  end
+
+  def ldflags_linux(args)
+    unless mode == :ld
+      wl = "-Wl,"
+      args << "-B#{@opt}/glibc/lib"
+    end
+    args += rpath_flags("#{wl}-rpath=", rpath_paths)
+    args += ["#{wl}--dynamic-linker=#{dynamic_linker_path}"] if dynamic_linker_path
+    args
+  end
+
+  def ldflags
+    args = path_flags("-L", library_paths)
+    if mac?
+      ldflags_mac(args)
+    elsif linux?
+      ldflags_linux(args)
+    else
+      args
+    end
   end
 
   def isystem_paths
@@ -276,6 +325,14 @@ class Cmd
 
   def library_paths
     path_split("HOMEBREW_LIBRARY_PATHS")
+  end
+
+  def rpath_paths
+    path_split("HOMEBREW_RPATH_PATHS")
+  end
+
+  def dynamic_linker_path
+    chuzzle(ENV["HOMEBREW_DYNAMIC_LINKER"])
   end
 
   def system_library_paths
@@ -324,6 +381,12 @@ class Cmd
     paths.map! { |path| prefix + path }
   end
 
+  # Unlike path_flags, do not prune non-existent directories.
+  # formula.lib for example does not yet exist, but should not be pruned.
+  def rpath_flags(prefix, paths)
+    paths.uniq.map { |path| prefix + path }
+  end
+
   def path_split(key)
     ENV.fetch(key) { "" }.split(File::PATH_SEPARATOR)
   end
@@ -341,12 +404,20 @@ def log(basename, argv, tool, args)
   adds = args - argv
   dels = argv - args
 
-  s = ""
+  s = +""
   s << "#{basename} called with: #{argv.join(" ")}\n"
   s << "superenv removed:  #{dels.join(" ")}\n" unless dels.empty?
   s << "superenv added:    #{adds.join(" ")}\n" unless adds.empty?
   s << "superenv executed: #{tool} #{args.join(" ")}\n\n"
   File.open("#{ENV["HOMEBREW_CC_LOG_PATH"]}.cc", "a+") { |f| f.write(s) }
+end
+
+def remove_superbin_from_path(paths)
+  superbin = Pathname.new(__FILE__).dirname.realpath
+  paths.reject do |x|
+    path = Pathname.new(x)
+    path.directory? && path.realpath == superbin
+  end
 end
 
 if __FILE__ == $PROGRAM_NAME
@@ -368,5 +439,13 @@ if __FILE__ == $PROGRAM_NAME
   log(basename, ARGV, tool, args)
 
   args << { :close_others => false }
-  exec "#{dirname}/xcrun", tool, *args
+  if mac?
+    exec "#{dirname}/xcrun", tool, *args
+  else
+    paths = ENV["PATH"].split(":")
+    paths = remove_superbin_from_path(paths)
+    paths.unshift "#{ENV["HOMEBREW_PREFIX"]}/bin"
+    ENV["PATH"] = paths.join(":")
+    exec tool, *args
+  end
 end

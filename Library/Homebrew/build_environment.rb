@@ -1,4 +1,4 @@
-require "set"
+# frozen_string_literal: true
 
 class BuildEnvironment
   def initialize(*settings)
@@ -22,16 +22,18 @@ class BuildEnvironment
   def userpaths?
     @settings.include? :userpaths
   end
-end
 
-module BuildEnvironmentDSL
-  def env(*settings)
-    @env ||= BuildEnvironment.new
-    @env.merge(settings)
+  module DSL
+    def env(*settings)
+      @env ||= BuildEnvironment.new
+      @env.merge(settings)
+    end
   end
 end
 
 module Homebrew
+  module_function
+
   def build_env_keys(env)
     %w[
       CC CXX LD OBJC OBJCXX
@@ -41,9 +43,10 @@ module Homebrew
       MACOSX_DEPLOYMENT_TARGET PKG_CONFIG_PATH PKG_CONFIG_LIBDIR
       HOMEBREW_DEBUG HOMEBREW_MAKE_JOBS HOMEBREW_VERBOSE
       HOMEBREW_SVN HOMEBREW_GIT
-      HOMEBREW_SDKROOT HOMEBREW_BUILD_FROM_SOURCE
+      HOMEBREW_SDKROOT
       MAKE GIT CPP
       ACLOCAL_PATH PATH CPATH
+      LD_LIBRARY_PATH LD_RUN_PATH LD_PRELOAD LIBRARY_PATH
     ].select { |key| env.key?(key) }
   end
 
@@ -53,11 +56,12 @@ module Homebrew
 
     keys.each do |key|
       value = env[key]
-      s = "#{key}: #{value}"
+      s = +"#{key}: #{value}"
       case key
       when "CC", "CXX", "LD"
         s << " => #{Pathname.new(value).realpath}" if File.symlink?(value)
       end
+      s.freeze
       f.puts s
     end
   end

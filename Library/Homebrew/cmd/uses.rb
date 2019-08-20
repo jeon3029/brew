@@ -1,96 +1,103 @@
-#:  * `uses` [`--installed`] [`--recursive`] [`--include-build`] [`--include-optional`] [`--skip-recommended`] [`--devel`|`--HEAD`] <formulae>:
-#:    Show the formulae that specify <formulae> as a dependency. When given
-#:    multiple formula arguments, show the intersection of formulae that use
-#:    <formulae>.
-#:
-#:    Use `--recursive` to resolve more than one level of dependencies.
-#:
-#:    If `--installed` is passed, only list installed formulae.
-#:
-#:    By default, `uses` shows all formulae that specify <formulae> as a required
-#:    or recommended dependency. To include the `:build` type dependencies, pass
-#:    `--include-build`. Similarly, pass `--include-optional` to include `:optional`
-#:    dependencies. To skip `:recommended` type dependencies, pass `--skip-recommended`.
-#:
-#:    By default, `uses` shows usages of `formula` by stable builds. To find
-#:    cases where `formula` is used by development or HEAD build, pass
-#:    `--devel` or `--HEAD`.
+# frozen_string_literal: true
 
 require "formula"
+require "cli/parser"
 
 # `brew uses foo bar` returns formulae that use both foo and bar
 # If you want the union, run the command twice and concatenate the results.
 # The intersection is harder to achieve with shell tools.
 
 module Homebrew
-  def uses
-    raise FormulaUnspecifiedError if ARGV.named.empty?
+  module_function
 
-    used_formulae = ARGV.formulae
-    formulae = ARGV.include?("--installed") ? Formula.installed : Formula
-    recursive = ARGV.flag? "--recursive"
-    includes = []
-    ignores = []
-    if ARGV.include? "--include-build"
-      includes << "build?"
-    else
-      ignores << "build?"
+  def uses_args
+    Homebrew::CLI::Parser.new do
+      usage_banner <<~EOS
+        `uses` [<options>] <formula>
+
+        Show the formulae that specify <formula> as a dependency. When given
+        multiple formula arguments, show the intersection of formulae that use
+        <formula>.
+
+        By default, `uses` shows all formulae that specify <formula> as a required
+        or recommended dependency.
+
+        By default, `uses` shows usage of <formula> by stable builds.
+      EOS
+      switch "--recursive",
+             description: "Resolve more than one level of dependencies."
+      switch "--installed",
+             description: "Only list installed formulae."
+      switch "--include-build",
+             description: "Include all formulae that specify <formula> as `:build` type dependency."
+      switch "--include-test",
+             description: "Include all formulae that specify <formula> as `:test` type dependency."
+      switch "--include-optional",
+             description: "Include all formulae that specify <formula> as `:optional` type dependency."
+      switch "--skip-recommended",
+             description: "Skip all formulae that specify <formula> as `:recommended` type dependency."
+      switch "--devel",
+             description: "Show usage of <formula> by development build."
+      switch "--HEAD",
+             description: "Show usage of <formula> by HEAD build."
+      switch :debug
+      conflicts "--devel", "--HEAD"
     end
-    if ARGV.include? "--include-optional"
-      includes << "optional?"
-    else
-      ignores << "optional?"
+  end
+
+  def uses
+    uses_args.parse
+
+    raise FormulaUnspecifiedError if args.remaining.empty?
+
+    used_formulae_missing = false
+    used_formulae = begin
+      ARGV.formulae
+    rescue FormulaUnavailableError => e
+      opoo e
+      used_formulae_missing = true
+      # If the formula doesn't exist: fake the needed formula object name.
+      ARGV.named.map { |name| OpenStruct.new name: name, full_name: name }
     end
-    ignores << "recommended?" if ARGV.include? "--skip-recommended"
+
+    formulae = args.installed? ? Formula.installed : Formula
+    recursive = args.recursive?
+    only_installed_arg = args.installed? &&
+                         !args.include_build? &&
+                         !args.include_test? &&
+                         !args.include_optional? &&
+                         !args.skip_recommended?
+
+    includes, ignores = argv_includes_ignores(ARGV)
 
     uses = formulae.select do |f|
       used_formulae.all? do |ff|
         begin
-          if recursive
-            deps = f.recursive_dependencies do |dependent, dep|
-              if dep.recommended?
-                Dependency.prune if ignores.include?("recommended?") || dependent.build.without?(dep)
-              elsif dep.optional?
-                Dependency.prune if !includes.include?("optional?") && !dependent.build.with?(dep)
-              elsif dep.build?
-                Dependency.prune unless includes.include?("build?")
-              end
-            end
-            reqs = f.recursive_requirements do |dependent, req|
-              if req.recommended?
-                Requirement.prune if ignores.include?("recommended?") || dependent.build.without?(req)
-              elsif req.optional?
-                Requirement.prune if !includes.include?("optional?") && !dependent.build.with?(req)
-              elsif req.build?
-                Requirement.prune unless includes.include?("build?")
-              end
-            end
+          deps = f.runtime_dependencies if only_installed_arg
+          deps ||= if recursive
+            recursive_includes(Dependency, f, includes, ignores)
           else
-            deps = f.deps.reject do |dep|
-              ignores.any? { |ignore| dep.send(ignore) } && !includes.any? { |include| dep.send(include) }
-            end
-            reqs = f.requirements.reject do |req|
-              ignores.any? { |ignore| req.send(ignore) } && !includes.any? { |include| req.send(include) }
-            end
+            reject_ignores(f.deps, ignores, includes)
           end
-          next true if deps.any? do |dep|
+
+          deps.any? do |dep|
             begin
               dep.to_formula.full_name == ff.full_name
             rescue
               dep.name == ff.name
             end
           end
-
-          reqs.any? do |req|
-            req.name == ff.name || [ff.name, ff.full_name].include?(req.default_formula)
-          end
         rescue FormulaUnavailableError
           # Silently ignore this case as we don't care about things used in
           # taps that aren't currently tapped.
+          next
         end
       end
     end
 
-    puts_columns uses.map(&:full_name)
+    return if uses.empty?
+
+    puts Formatter.columns(uses.map(&:full_name).sort)
+    odie "Missing formulae should not have dependents!" if used_formulae_missing
   end
 end

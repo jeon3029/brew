@@ -1,30 +1,38 @@
-unless ENV["HOMEBREW_BREW_FILE"]
-  raise "HOMEBREW_BREW_FILE was not exported! Please call bin/brew directly!"
-end
+# frozen_string_literal: true
+
+raise "HOMEBREW_BREW_FILE was not exported! Please call bin/brew directly!" unless ENV["HOMEBREW_BREW_FILE"]
 
 std_trap = trap("INT") { exit! 130 } # no backtrace thanks
 
 # check ruby version before requiring any modules.
-RUBY_TWO = RUBY_VERSION.split(".").first.to_i >= 2
-raise "Homebrew must be run under Ruby 2!" unless RUBY_TWO
-
-require "pathname"
-HOMEBREW_LIBRARY_PATH = Pathname.new(__FILE__).realpath.parent
-$:.unshift(HOMEBREW_LIBRARY_PATH.to_s)
-require "global"
-
-if ARGV == %w[--version] || ARGV == %w[-v]
-  puts "Homebrew #{HOMEBREW_VERSION}"
-  puts "Homebrew/homebrew-core #{Homebrew.core_tap_version_string}"
-  exit 0
+RUBY_X, RUBY_Y, = RUBY_VERSION.split(".").map(&:to_i)
+if RUBY_X < 2 || (RUBY_X == 2 && RUBY_Y < 3)
+  raise "Homebrew must be run under Ruby 2.3! You're running #{RUBY_VERSION}."
 end
 
-def require?(path)
-  require path
-rescue LoadError => e
-  # HACK: ( because we should raise on syntax errors but
-  # not if the file doesn't exist. TODO make robust!
-  raise unless e.to_s.include? path
+# Load Bundler first of all if it's needed to avoid Gem version conflicts.
+if ENV["HOMEBREW_INSTALL_BUNDLER_GEMS_FIRST"]
+  require_relative "utils/gems"
+  Homebrew.install_bundler_gems!
+end
+
+# Also define here so we can rescue regardless of location.
+class MissingEnvironmentVariables < RuntimeError; end
+
+begin
+  require_relative "global"
+rescue MissingEnvironmentVariables => e
+  raise e if ENV["HOMEBREW_MISSING_ENV_RETRY"]
+
+  if ENV["HOMEBREW_DEVELOPER"]
+    $stderr.puts <<~EOS
+      Warning: #{e.message}
+      Retrying with `exec #{ENV["HOMEBREW_BREW_FILE"]}`!
+    EOS
+  end
+
+  ENV["HOMEBREW_MISSING_ENV_RETRY"] = "1"
+  exec ENV["HOMEBREW_BREW_FILE"], *ARGV
 end
 
 begin
@@ -32,123 +40,126 @@ begin
 
   empty_argv = ARGV.empty?
   help_flag_list = %w[-h --help --usage -?]
-  help_flag = false
-  internal_cmd = true
+  help_flag = !ENV["HOMEBREW_HELP"].nil?
   cmd = nil
 
   ARGV.dup.each_with_index do |arg, i|
     break if help_flag && cmd
 
-    if help_flag_list.include?(arg)
-      # Option-style help: Both `--help <cmd>` and `<cmd> --help` are fine.
-      help_flag = true
-    elsif arg == "help" && !cmd
+    if arg == "help" && !cmd
       # Command-style help: `help <cmd>` is fine, but `<cmd> help` is not.
       help_flag = true
-    elsif !cmd
+    elsif !cmd && !help_flag_list.include?(arg)
       cmd = ARGV.delete_at(i)
     end
   end
 
-  # Add contributed commands to PATH before checking.
-  Dir["#{HOMEBREW_LIBRARY}/Taps/*/*/cmd"].each do |tap_cmd_dir|
-    ENV["PATH"] += "#{File::PATH_SEPARATOR}#{tap_cmd_dir}"
-  end
-
-  # Add cask commands to PATH.
-  ENV["PATH"] += "#{File::PATH_SEPARATOR}#{HOMEBREW_LIBRARY}/Homebrew/cask/cmd"
+  path = PATH.new(ENV["PATH"])
+  homebrew_path = PATH.new(ENV["HOMEBREW_PATH"])
 
   # Add SCM wrappers.
-  ENV["PATH"] += "#{File::PATH_SEPARATOR}#{HOMEBREW_SHIMS_PATH}/scm"
+  path.prepend(HOMEBREW_SHIMS_PATH/"scm")
+  homebrew_path.prepend(HOMEBREW_SHIMS_PATH/"scm")
+
+  ENV["PATH"] = path
 
   if cmd
-    internal_cmd = require? HOMEBREW_LIBRARY_PATH.join("cmd", cmd)
+    internal_cmd = require? HOMEBREW_LIBRARY_PATH/"cmd"/cmd
 
     unless internal_cmd
-      internal_cmd = require? HOMEBREW_LIBRARY_PATH.join("dev-cmd", cmd)
-      if internal_cmd && !ARGV.homebrew_developer?
-        safe_system "git", "config", "--file=#{HOMEBREW_REPOSITORY}/.git/config",
-                                     "--replace-all", "homebrew.devcmdrun", "true"
+      internal_dev_cmd = require? HOMEBREW_LIBRARY_PATH/"dev-cmd"/cmd
+      internal_cmd = internal_dev_cmd
+      if internal_dev_cmd && !ARGV.homebrew_developer?
+        if (HOMEBREW_REPOSITORY/".git/config").exist?
+          system "git", "config", "--file=#{HOMEBREW_REPOSITORY}/.git/config",
+                 "--replace-all", "homebrew.devcmdrun", "true"
+        end
         ENV["HOMEBREW_DEV_CMD_RUN"] = "1"
       end
     end
   end
 
-  # Usage instructions should be displayed if and only if one of:
-  # - a help flag is passed AND an internal command is matched
-  # - a help flag is passed AND there is no command specified
-  # - no arguments are passed
-  #
-  # It should never affect external commands so they can handle usage
-  # arguments themselves.
-  if empty_argv || help_flag
-    require "cmd/help"
-    Homebrew.help cmd, empty_argv: empty_argv
-    # `Homebrew.help` never returns, except for external/unknown commands.
+  unless internal_cmd
+    # Add contributed commands to PATH before checking.
+    homebrew_path.append(Tap.cmd_directories)
+
+    # External commands expect a normal PATH
+    ENV["PATH"] = homebrew_path
   end
 
-  # Migrate LinkedKegs/PinnedKegs if update didn't already do so
-  migrate_legacy_keg_symlinks_if_necessary
-
-  # Uninstall old brew-cask if it's still around; we just use the tap now.
-  if cmd == "cask" && (HOMEBREW_CELLAR/"brew-cask").exist?
-    system(HOMEBREW_BREW_FILE, "uninstall", "--force", "brew-cask")
+  # Usage instructions should be displayed if and only if one of:
+  # - a help flag is passed AND a command is matched
+  # - a help flag is passed AND there is no command specified
+  # - no arguments are passed
+  # - if cmd is Cask, let Cask handle the help command instead
+  if (empty_argv || help_flag) && cmd != "cask"
+    require "help"
+    Homebrew::Help.help cmd, empty_argv: empty_argv
+    # `Homebrew.help` never returns, except for external/unknown commands.
   end
 
   if internal_cmd
     Homebrew.send cmd.to_s.tr("-", "_").downcase
   elsif which "brew-#{cmd}"
-    %w[CACHE LIBRARY_PATH].each do |e|
-      ENV["HOMEBREW_#{e}"] = Object.const_get("HOMEBREW_#{e}").to_s
+    %w[CACHE LIBRARY_PATH].each do |env|
+      ENV["HOMEBREW_#{env}"] = Object.const_get("HOMEBREW_#{env}").to_s
     end
     exec "brew-#{cmd}", *ARGV
   elsif (path = which("brew-#{cmd}.rb")) && require?(path)
     exit Homebrew.failed? ? 1 : 0
   else
-    require "tap"
     possible_tap = OFFICIAL_CMD_TAPS.find { |_, cmds| cmds.include?(cmd) }
     possible_tap = Tap.fetch(possible_tap.first) if possible_tap
 
-    if possible_tap && !possible_tap.installed?
-      brew_uid = HOMEBREW_BREW_FILE.stat.uid
-      tap_commands = []
-      if Process.uid.zero? && !brew_uid.zero?
-        tap_commands += %W[/usr/bin/sudo -u ##{brew_uid}]
-      end
-      tap_commands += %W[#{HOMEBREW_BREW_FILE} tap #{possible_tap}]
-      safe_system(*tap_commands)
-      exec HOMEBREW_BREW_FILE, cmd, *ARGV
-    else
-      odie "Unknown command: #{cmd}"
-    end
-  end
+    odie "Unknown command: #{cmd}" if !possible_tap || possible_tap.installed?
 
+    # Unset HOMEBREW_HELP to avoid confusing the tap
+    ENV.delete("HOMEBREW_HELP") if help_flag
+    tap_commands = []
+    cgroup = Utils.popen_read("cat", "/proc/1/cgroup")
+    if !cgroup.include?("azpl_job") && !cgroup.include?("docker")
+      brew_uid = HOMEBREW_BREW_FILE.stat.uid
+      tap_commands += %W[/usr/bin/sudo -u ##{brew_uid}] if Process.uid.zero? && !brew_uid.zero?
+    end
+    tap_commands += %W[#{HOMEBREW_BREW_FILE} tap #{possible_tap.name}]
+    safe_system(*tap_commands)
+    ENV["HOMEBREW_HELP"] = "1" if help_flag
+    exec HOMEBREW_BREW_FILE, cmd, *ARGV
+  end
 rescue UsageError => e
-  require "cmd/help"
-  Homebrew.help cmd, usage_error: e.message
+  require "help"
+  Homebrew::Help.help cmd, usage_error: e.message
 rescue SystemExit => e
-  onoe "Kernel.exit" if ARGV.verbose? && !e.success?
+  onoe "Kernel.exit" if ARGV.debug? && !e.success?
   $stderr.puts e.backtrace if ARGV.debug?
   raise
-rescue Interrupt => e
+rescue Interrupt
   $stderr.puts # seemingly a newline is typical
   exit 130
 rescue BuildError => e
-  Utils::Analytics.report_exception(e)
+  Utils::Analytics.report_build_error(e)
   e.dump
   exit 1
 rescue RuntimeError, SystemCallError => e
-  Utils::Analytics.report_exception(e)
   raise if e.message.empty?
+
   onoe e
   $stderr.puts e.backtrace if ARGV.debug?
   exit 1
-rescue Exception => e
-  Utils::Analytics.report_exception(e)
+rescue MethodDeprecatedError => e
   onoe e
-  if internal_cmd && defined?(OS::ISSUES_URL)
-    $stderr.puts "#{Tty.white}Please report this bug:"
-    $stderr.puts "    #{Tty.em}#{OS::ISSUES_URL}#{Tty.reset}"
+  if e.issues_url
+    $stderr.puts "If reporting this issue please do so at (not Homebrew/brew or Homebrew/core):"
+    $stderr.puts "  #{Formatter.url(e.issues_url)}"
+  end
+  $stderr.puts e.backtrace if ARGV.debug?
+  exit 1
+rescue Exception => e # rubocop:disable Lint/RescueException
+  onoe e
+  if internal_cmd && defined?(OS::ISSUES_URL) &&
+     !ENV["HOMEBREW_NO_AUTO_UPDATE"]
+    $stderr.puts "#{Tty.bold}Please report this bug:#{Tty.reset}"
+    $stderr.puts "  #{Formatter.url(OS::ISSUES_URL)}"
   end
   $stderr.puts e.backtrace
   exit 1

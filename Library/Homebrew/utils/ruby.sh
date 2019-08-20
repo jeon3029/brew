@@ -2,7 +2,8 @@ setup-ruby-path() {
   local vendor_dir
   local vendor_ruby_current_version
   local vendor_ruby_path
-  local ruby_version_major
+  local ruby_version_new_enough
+  local minimum_ruby_version="2.3.7"
 
   vendor_dir="$HOMEBREW_LIBRARY/Homebrew/vendor"
   vendor_ruby_current_version="$vendor_dir/portable-ruby/current"
@@ -21,7 +22,7 @@ setup-ruby-path() {
 
       if [[ $(readlink "$vendor_ruby_current_version") != "$(<"$vendor_dir/portable-ruby-version")" ]]
       then
-        if ! brew vendor-install ruby --quiet
+        if ! brew vendor-install ruby
         then
           onoe "Failed to upgrade vendor Ruby."
         fi
@@ -31,19 +32,20 @@ setup-ruby-path() {
       then
         HOMEBREW_RUBY_PATH="/System/Library/Frameworks/Ruby.framework/Versions/Current/usr/bin/ruby"
       else
-        HOMEBREW_RUBY_PATH="$(which ruby)"
+        HOMEBREW_RUBY_PATH="$(type -P ruby)"
       fi
 
-      if [[ -n "$HOMEBREW_RUBY_PATH" ]]
+      if [[ -n "$HOMEBREW_MACOS_SYSTEM_RUBY_NEW_ENOUGH" ]]
       then
-        ruby_version_major="$("$HOMEBREW_RUBY_PATH" --version)"
-        ruby_version_major="${ruby_version_major#ruby }"
-        ruby_version_major="${ruby_version_major%%.*}"
+        ruby_version_new_enough="true"
+      elif [[ -n "$HOMEBREW_RUBY_PATH" && -z "$HOMEBREW_FORCE_VENDOR_RUBY" ]]
+      then
+        ruby_version_new_enough="$("$HOMEBREW_RUBY_PATH" --enable-frozen-string-literal --disable=gems,did_you_mean,rubyopt -rrubygems -e "puts Gem::Version.new(RUBY_VERSION.to_s.dup) >= Gem::Version.new('$minimum_ruby_version')")"
       fi
 
-      if [[ "$ruby_version_major" != "2" || -n "$HOMEBREW_FORCE_VENDOR_RUBY" ]]
+      if [[ -z "$HOMEBREW_RUBY_PATH" || -n "$HOMEBREW_FORCE_VENDOR_RUBY" || "$ruby_version_new_enough" != "true" ]]
       then
-        brew vendor-install ruby --quiet
+        brew vendor-install ruby
         if [[ ! -x "$vendor_ruby_path" ]]
         then
           odie "Failed to install vendor Ruby."

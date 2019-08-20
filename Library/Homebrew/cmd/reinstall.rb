@@ -1,71 +1,63 @@
-#:  * `reinstall` <formula>:
-#:    Uninstall and then install <formula>.
+# frozen_string_literal: true
 
 require "formula_installer"
 require "development_tools"
+require "messages"
+require "reinstall"
+require "cli/parser"
+require "cleanup"
 
 module Homebrew
+  module_function
+
+  def reinstall_args
+    Homebrew::CLI::Parser.new do
+      usage_banner <<~EOS
+        `reinstall` [<options>] <formula>
+
+        Uninstall and then install <formula> (with existing and any appended install options).
+
+        Unless `HOMEBREW_NO_INSTALL_CLEANUP` is set, `brew cleanup` will be run for the reinstalled formulae or, every 30 days, for all formulae.
+      EOS
+      switch :debug,
+             description: "If brewing fails, open an interactive debugging session with access to IRB "\
+                          "or a shell inside the temporary build directory"
+      switch "-s", "--build-from-source",
+             description: "Compile <formula> from source even if a bottle is available."
+      switch "--force-bottle",
+             description: "Install from a bottle if it exists for the current or newest version of "\
+                          "macOS, even if it would not normally be used for installation."
+      switch "--keep-tmp",
+             description: "Don't delete the temporary files created during installation."
+      switch :force,
+             description: "Install without checking for previously installed keg-only or "\
+                          "non-migrated versions."
+      switch :verbose,
+             description: "Print the verification and postinstall steps."
+      switch "--display-times",
+             env:         :display_install_times,
+             description: "Print install times for each formula at the end of the run."
+      conflicts "--build-from-source", "--force-bottle"
+      formula_options
+    end
+  end
+
   def reinstall
+    reinstall_args.parse
+
     FormulaInstaller.prevent_build_flags unless DevelopmentTools.installed?
+
+    Install.perform_preinstall_checks
 
     ARGV.resolved_formulae.each do |f|
       if f.pinned?
         onoe "#{f.full_name} is pinned. You must unpin it to reinstall."
         next
       end
+      Migrator.migrate_if_needed(f)
       reinstall_formula(f)
+      Cleanup.install_formula_clean!(f)
     end
-  end
-
-  def reinstall_formula(f)
-    options = BuildOptions.new(Options.create(ARGV.flags_only), f.options).used_options
-    options |= f.build.used_options
-
-    notice  = "Reinstalling #{f.full_name}"
-    notice += " with #{options * ", "}" unless options.empty?
-    oh1 notice
-
-    if f.opt_prefix.directory?
-      keg = Keg.new(f.opt_prefix.resolved_path)
-      backup keg
-    end
-
-    fi = FormulaInstaller.new(f)
-    fi.options             = options
-    fi.build_bottle        = ARGV.build_bottle? || (!f.bottled? && f.build.build_bottle?)
-    fi.build_from_source   = ARGV.build_from_source? || ARGV.build_all_from_source?
-    fi.force_bottle        = ARGV.force_bottle?
-    fi.interactive         = ARGV.interactive?
-    fi.git                 = ARGV.git?
-    fi.verbose             = ARGV.verbose?
-    fi.debug               = ARGV.debug?
-    fi.prelude
-    fi.install
-    fi.finish
-  rescue FormulaInstallationAlreadyAttemptedError
-    # next
-  rescue Exception
-    ignore_interrupts { restore_backup(keg, f) }
-    raise
-  else
-    backup_path(keg).rmtree if backup_path(keg).exist?
-  end
-
-  def backup(keg)
-    keg.unlink
-    keg.rename backup_path(keg)
-  end
-
-  def restore_backup(keg, formula)
-    path = backup_path(keg)
-
-    return unless path.directory?
-
-    path.rename keg
-    keg.link unless formula.keg_only?
-  end
-
-  def backup_path(path)
-    Pathname.new "#{path}.reinstall"
+    Homebrew.messages.display_messages
   end
 end

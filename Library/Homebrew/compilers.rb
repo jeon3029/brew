@@ -1,20 +1,26 @@
+# frozen_string_literal: true
+
 # @private
 module CompilerConstants
-  GNU_GCC_VERSIONS = %w[4.3 4.4 4.5 4.6 4.7 4.8 4.9 5 6 7].freeze
-  GNU_GCC_REGEXP = /^gcc-(4\.[3-9]|[5-7])$/
+  GNU_GCC_VERSIONS = %w[4.9 5 6 7 8 9].freeze
+  GNU_GCC_REGEXP = /^gcc-(4\.9|[5-9])$/.freeze
   COMPILER_SYMBOL_MAP = {
-    "gcc-4.0"  => :gcc_4_0,
-    "gcc-4.2"  => :gcc,
-    "clang"    => :clang,
+    "gcc"        => :gcc,
+    "clang"      => :clang,
+    "llvm_clang" => :llvm_clang,
   }.freeze
 
-  COMPILERS = COMPILER_SYMBOL_MAP.values +
-              GNU_GCC_VERSIONS.map { |n| "gcc-#{n}" }
+  COMPILERS = (COMPILER_SYMBOL_MAP.values +
+               GNU_GCC_VERSIONS.map { |n| "gcc-#{n}" }).freeze
 end
 
 class CompilerFailure
   attr_reader :name
-  attr_rw :version
+
+  def version(val = nil)
+    @version = Version.parse(val.to_s) if val
+    @version
+  end
 
   # Allows Apple compiler `fails_with` statements to keep using `build`
   # even though `build` and `version` are the same internally
@@ -34,7 +40,7 @@ class CompilerFailure
     if spec.is_a?(Hash)
       _, major_version = spec.first
       name = "gcc-#{major_version}"
-      # so fails_with :gcc => '4.8' simply marks all 4.8 releases incompatible
+      # so fails_with :gcc => '7' simply marks all 7 releases incompatible
       version = "#{major_version}.999"
     else
       name = spec
@@ -45,7 +51,7 @@ class CompilerFailure
 
   def initialize(name, version, &block)
     @name = name
-    @version = version
+    @version = Version.parse(version.to_s)
     instance_eval(&block) if block_given?
   end
 
@@ -58,15 +64,6 @@ class CompilerFailure
   end
 
   COLLECTIONS = {
-    cxx11: [
-      create(:gcc_4_0),
-      create(:gcc),
-      create(:clang) { build 425 },
-      create(gcc: "4.3"),
-      create(gcc: "4.4"),
-      create(gcc: "4.5"),
-      create(gcc: "4.6"),
-    ],
     openmp: [
       create(:clang),
     ],
@@ -79,9 +76,8 @@ class CompilerSelector
   Compiler = Struct.new(:name, :version)
 
   COMPILER_PRIORITY = {
-    clang: [:clang, :gcc, :gnu, :gcc_4_0],
-    gcc: [:gcc, :gnu, :clang, :gcc_4_0],
-    gcc_4_0: [:gcc_4_0, :gcc, :gnu, :clang],
+    clang: [:clang, :gnu, :llvm_clang],
+    gcc:   [:gnu, :gcc, :llvm_clang, :clang],
   }.freeze
 
   def self.select_for(formula, compilers = self.compilers)
@@ -108,20 +104,28 @@ class CompilerSelector
 
   private
 
+  def gnu_gcc_versions
+    # prioritize gcc version provided by gcc formula.
+    v = Formulary.factory("gcc").version.to_s.slice(/\d/)
+    GNU_GCC_VERSIONS - [v] + [v] # move the version to the end of the list
+  rescue FormulaUnavailableError
+    GNU_GCC_VERSIONS
+  end
+
   def find_compiler
     compilers.each do |compiler|
       case compiler
       when :gnu
-        GNU_GCC_VERSIONS.reverse_each do |v|
+        gnu_gcc_versions.reverse_each do |v|
           name = "gcc-#{v}"
           version = compiler_version(name)
-          yield Compiler.new(name, version) if version
+          yield Compiler.new(name, version) unless version.null?
         end
       when :llvm
-        # no-op. DSL supported, compiler is not.
+        next # no-op. DSL supported, compiler is not.
       else
         version = compiler_version(compiler)
-        yield Compiler.new(compiler, version) if version
+        yield Compiler.new(compiler, version) unless version.null?
       end
     end
   end
@@ -131,9 +135,9 @@ class CompilerSelector
   end
 
   def compiler_version(name)
-    case name
-    when GNU_GCC_REGEXP
-      versions.non_apple_gcc_version(name)
+    case name.to_s
+    when "gcc", GNU_GCC_REGEXP
+      versions.non_apple_gcc_version(name.to_s)
     else
       versions.send("#{name}_build_version")
     end

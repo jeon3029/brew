@@ -1,36 +1,25 @@
+# frozen_string_literal: true
+
 require "erb"
 require "tempfile"
 
 class Sandbox
-  SANDBOX_EXEC = "/usr/bin/sandbox-exec".freeze
-  SANDBOXED_TAPS = %w[
-    homebrew/core
-    homebrew/dupes
-    homebrew/fuse
-    homebrew/devel-only
-    homebrew/tex
-  ].freeze
+  SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 
   def self.available?
-    OS.mac? && OS::Mac.version >= "10.6" && File.executable?(SANDBOX_EXEC)
+    OS.mac? && File.executable?(SANDBOX_EXEC)
   end
 
-  def self.formula?(formula)
+  def self.formula?(_formula)
     return false unless available?
-    return false if ARGV.no_sandbox?
-    ARGV.sandbox? || SANDBOXED_TAPS.include?(formula.tap.to_s)
+
+    !ARGV.no_sandbox?
   end
 
   def self.test?
     return false unless available?
-    !ARGV.no_sandbox?
-  end
 
-  def self.print_sandbox_message
-    unless @printed_sandbox_message
-      ohai "Using the sandbox"
-      @printed_sandbox_message = true
-    end
+    !ARGV.no_sandbox?
   end
 
   def initialize
@@ -67,6 +56,15 @@ class Sandbox
     allow_write "^/private/var/folders/[^/]+/[^/]+/[C,T]/", type: :regex
     allow_write_path HOMEBREW_TEMP
     allow_write_path HOMEBREW_CACHE
+  end
+
+  def allow_cvs
+    allow_write_path "/Users/#{ENV["USER"]}/.cvspass"
+  end
+
+  def allow_fossil
+    allow_write_path "/Users/#{ENV["USER"]}/.fossil"
+    allow_write_path "/Users/#{ENV["USER"]}/.fossil-journal"
   end
 
   def allow_write_cellar(formula)
@@ -123,10 +121,10 @@ class Sandbox
 
     unless logs.empty?
       if @logfile
-        log = open(@logfile, "w")
-        log.write logs
-        log.write "\nWe use time to filter sandbox log. Therefore, unrelated logs may be recorded.\n"
-        log.close
+        File.open(@logfile, "w") do |log|
+          log.write logs
+          log.write "\nWe use time to filter sandbox log. Therefore, unrelated logs may be recorded.\n"
+        end
       end
 
       if @failed && ARGV.verbose?
@@ -141,6 +139,7 @@ class Sandbox
 
   def expand_realpath(path)
     raise unless path.absolute?
+
     path.exist? ? path.realpath : expand_realpath(path.parent)/path.basename
   end
 
@@ -153,7 +152,7 @@ class Sandbox
   end
 
   class SandboxProfile
-    SEATBELT_ERB = <<-EOS.undent
+    SEATBELT_ERB = <<~ERB
       (version 1)
       (debug deny) ; log all denied operations to /var/log/system.log
       <%= rules.join("\n") %>
@@ -161,6 +160,7 @@ class Sandbox
           (literal "/dev/ptmx")
           (literal "/dev/dtracehelper")
           (literal "/dev/null")
+          (literal "/dev/random")
           (literal "/dev/zero")
           (regex #"^/dev/fd/[0-9]+$")
           (regex #"^/dev/ttys?[0-9]*$")
@@ -171,7 +171,7 @@ class Sandbox
           (with no-sandbox)
           ) ; allow certain processes running without sandbox
       (allow default) ; allow everything else
-    EOS
+    ERB
 
     attr_reader :rules
 
@@ -180,13 +180,13 @@ class Sandbox
     end
 
     def add_rule(rule)
-      s = "("
-      s << (rule[:allow] ? "allow": "deny")
+      s = +"("
+      s << (rule[:allow] ? "allow" : "deny")
       s << " #{rule[:operation]}"
       s << " (#{rule[:filter]})" if rule[:filter]
       s << " (with #{rule[:modifier]})" if rule[:modifier]
       s << ")"
-      @rules << s
+      @rules << s.freeze
     end
 
     def dump

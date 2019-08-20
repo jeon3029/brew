@@ -1,40 +1,47 @@
-#:  * `tap-info`:
-#:    Display a brief summary of all installed taps.
-#:
-#:  * `tap-info` (`--installed`|<taps>):
-#:    Display detailed information about one or more <taps>.
-#:
-#:    Pass `--installed` to display information on all installed taps.
-#:
-#:  * `tap-info` `--json=`<version> (`--installed`|<taps>):
-#:    Print a JSON representation of <taps>. Currently the only accepted value
-#:    for <version> is `v1`.
-#:
-#:    Pass `--installed` to get information on installed taps.
-#:
-#:    See the docs for examples of using the JSON:
-#:    <https://github.com/Homebrew/brew/blob/master/docs/Querying-Brew.md>
+# frozen_string_literal: true
 
-require "tap"
+require "cli/parser"
 
 module Homebrew
+  module_function
+
+  def tap_info_args
+    Homebrew::CLI::Parser.new do
+      usage_banner <<~EOS
+        `tap-info` [<options>] [<tap>]
+
+        Display detailed information about one or more provided <tap>.
+        Display a brief summary of all installed taps if no <tap> are passed.
+      EOS
+      switch "--installed",
+             description: "Display information on all installed taps."
+      flag "--json",
+           description: "Print a JSON representation of <taps>. Currently the default and only accepted "\
+                        "value for <version> is `v1`. See the docs for examples of using the JSON "\
+                        "output: <https://docs.brew.sh/Querying-Brew>"
+      switch :debug
+    end
+  end
+
   def tap_info
-    if ARGV.include? "--installed"
+    tap_info_args.parse
+
+    if args.installed?
       taps = Tap
     else
-      taps = ARGV.named.map do |name|
+      taps = ARGV.named.sort.map do |name|
         Tap.fetch(name)
       end
     end
 
-    if ARGV.json == "v1"
-      print_tap_json(taps)
+    if args.json
+      raise UsageError, "invalid JSON version: #{args.json}" unless ["v1", true].include? args.json
+
+      print_tap_json(taps.sort_by(&:to_s))
     else
-      print_tap_info(taps)
+      print_tap_info(taps.sort_by(&:to_s))
     end
   end
-
-  private
 
   def print_tap_info(taps)
     if taps.none?
@@ -50,12 +57,12 @@ module Homebrew
         pinned_count += 1 if tap.pinned?
         private_count += 1 if tap.private?
       end
-      info = "#{tap_count} tap#{plural(tap_count)}"
+      info = "#{tap_count} #{"tap".pluralize(tap_count)}"
       info += ", #{pinned_count} pinned"
       info += ", #{private_count} private"
-      info += ", #{formula_count} formula#{plural(formula_count, "e")}"
-      info += ", #{command_count} command#{plural(command_count)}"
-      info += ", #{Tap::TAP_DIRECTORY.abv}" if Tap::TAP_DIRECTORY.directory?
+      info += ", #{formula_count} #{"formula".pluralize(formula_count)}"
+      info += ", #{command_count} #{"command".pluralize(command_count)}"
+      info += ", #{Tap::TAP_DIRECTORY.dup.abv}" if Tap::TAP_DIRECTORY.directory?
       puts info
     else
       taps.each_with_index do |tap, i|
@@ -64,13 +71,11 @@ module Homebrew
         if tap.installed?
           info += tap.pinned? ? "pinned" : "unpinned"
           info += ", private" if tap.private?
-          if (formula_count = tap.formula_files.size) > 0
-            info += ", #{formula_count} formula#{plural(formula_count, "e")}"
+          info += if (contents = tap.contents).empty?
+            ", no commands/casks/formulae"
+          else
+            ", #{contents.join(", ")}"
           end
-          if (command_count = tap.command_files.size) > 0
-            info += ", #{command_count} command#{plural(command_count)}"
-          end
-          info += ", no formulae/commands" if (formula_count + command_count).zero?
           info += "\n#{tap.path} (#{tap.path.abv})"
           info += "\nFrom: #{tap.remote.nil? ? "N/A" : tap.remote}"
         else
@@ -82,6 +87,6 @@ module Homebrew
   end
 
   def print_tap_json(taps)
-    puts Utils::JSON.dump(taps.map(&:to_hash))
+    puts JSON.generate(taps.map(&:to_hash))
   end
 end

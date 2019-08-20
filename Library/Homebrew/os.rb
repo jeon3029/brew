@@ -1,25 +1,33 @@
+# frozen_string_literal: true
+
 module OS
   def self.mac?
     return false if ENV["HOMEBREW_TEST_GENERIC_OS"]
-    RUBY_PLATFORM.to_s.downcase.include? "darwin"
+
+    RbConfig::CONFIG["host_os"].include? "darwin"
   end
 
   def self.linux?
     return false if ENV["HOMEBREW_TEST_GENERIC_OS"]
-    RUBY_PLATFORM.to_s.downcase.include? "linux"
+
+    RbConfig::CONFIG["host_os"].include? "linux"
   end
 
   ::OS_VERSION = ENV["HOMEBREW_OS_VERSION"]
 
   if OS.mac?
     require "os/mac"
-    ISSUES_URL = "https://git.io/brew-troubleshooting".freeze
-    PATH_OPEN = "/usr/bin/open".freeze
-    # compatibility
-    ::MACOS_FULL_VERSION = OS::Mac.full_version.to_s.freeze
-    ::MACOS_VERSION = OS::Mac.version.to_s.freeze
+    # Don't tell people to report issues on unsupported configurations.
+    if !OS::Mac.prerelease? &&
+       !OS::Mac.outdated_release? &&
+       ARGV.none? { |v| v.start_with?("--cc=") } &&
+       ENV["HOMEBREW_PREFIX"] == "/usr/local"
+      ISSUES_URL = "https://docs.brew.sh/Troubleshooting"
+    end
+    PATH_OPEN = "/usr/bin/open"
   elsif OS.linux?
-    ISSUES_URL = "https://github.com/Linuxbrew/brew/wiki/troubleshooting".freeze
-    PATH_OPEN = "xdg-open".freeze
+    require "os/linux"
+    ISSUES_URL = "https://docs.brew.sh/Troubleshooting"
+    PATH_OPEN = "xdg-open"
   end
 end
