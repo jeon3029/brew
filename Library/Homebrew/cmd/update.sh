@@ -1,8 +1,8 @@
-#:  * `update` [<options>]
+#:  * `update`, `up` [<options>]
 #:
 #:  Fetch the newest version of Homebrew and all formulae from GitHub using `git`(1) and perform any necessary migrations.
 #:
-#:          --merge                      `git merge` is used to include updates (rather than `git rebase`).
+#:          --merge                      Use `git merge` to apply updates (rather than `git rebase`).
 #:      -f, --force                      Always do a slower, full update check (even if unnecessary).
 #:      -v, --verbose                    Print the directories checked and `git` operations performed.
 #:      -d, --debug                      Display a trace of all shell commands as they are executed.
@@ -314,7 +314,7 @@ homebrew-update() {
       *)
         odie <<EOS
 This command updates brew itself, and does not take formula names.
-Use 'brew upgrade $@' instead.
+Use \`brew upgrade $@\` instead.
 EOS
         ;;
     esac
@@ -337,7 +337,7 @@ EOS
 
   if [[ -z "$HOMEBREW_AUTO_UPDATE_SECS" ]]
   then
-    HOMEBREW_AUTO_UPDATE_SECS="60"
+    HOMEBREW_AUTO_UPDATE_SECS="300"
   fi
 
   # check permissions
@@ -451,12 +451,6 @@ EOS
     # origin branch name is, and use that. If not set, fall back to "master".
     # the refspec ensures that the default upstream branch gets updated
     (
-      if [[ -n "$HOMEBREW_UPDATE_PREINSTALL" ]]
-      then
-        # Skip taps checked/fetched recently
-        [[ -n "$(find "$DIR/.git/FETCH_HEAD" -type f -mtime -"${HOMEBREW_AUTO_UPDATE_SECS}"s 2>/dev/null)" ]] && exit
-      fi
-
       UPSTREAM_REPOSITORY_URL="$(git config remote.origin.url)"
       if [[ "$UPSTREAM_REPOSITORY_URL" = "https://github.com/"* ]]
       then
@@ -517,7 +511,7 @@ EOS
           if [[ "$UPSTREAM_SHA_HTTP_CODE" = "404" ]]
           then
             TAP="${DIR#$HOMEBREW_LIBRARY/Taps/}"
-            echo "$TAP does not exist! Run 'brew untap $TAP'" >>"$update_failed_file"
+            echo "$TAP does not exist! Run \`brew untap $TAP\` to remove it." >>"$update_failed_file"
           else
             echo "Fetching $DIR failed!" >>"$update_failed_file"
           fi

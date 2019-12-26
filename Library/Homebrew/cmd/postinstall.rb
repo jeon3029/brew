@@ -14,14 +14,16 @@ module Homebrew
 
         Rerun the post-install steps for <formula>.
       EOS
-      switch :verbose
       switch :force
+      switch :verbose
       switch :debug
     end
   end
 
   def postinstall
     postinstall_args.parse
+
+    raise KegUnspecifiedError if args.remaining.empty?
 
     ARGV.resolved_formulae.each do |f|
       ohai "Postinstalling #{f}"

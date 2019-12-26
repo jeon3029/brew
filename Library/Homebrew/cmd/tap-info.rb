@@ -10,15 +10,16 @@ module Homebrew
       usage_banner <<~EOS
         `tap-info` [<options>] [<tap>]
 
-        Display detailed information about one or more provided <tap>.
-        Display a brief summary of all installed taps if no <tap> are passed.
+        Show detailed information about one or more <tap>s.
+
+        If no <tap> names are provided, display brief statistics for all installed taps.
       EOS
       switch "--installed",
-             description: "Display information on all installed taps."
-      flag "--json",
-           description: "Print a JSON representation of <taps>. Currently the default and only accepted "\
-                        "value for <version> is `v1`. See the docs for examples of using the JSON "\
-                        "output: <https://docs.brew.sh/Querying-Brew>"
+             description: "Show information on each installed tap."
+      flag   "--json",
+             description: "Print a JSON representation of <tap>. Currently the default and only accepted "\
+                          "value for <version> is `v1`. See the docs for examples of using the JSON "\
+                          "output: <https://docs.brew.sh/Querying-Brew>"
       switch :debug
     end
   end
@@ -29,13 +30,13 @@ module Homebrew
     if args.installed?
       taps = Tap
     else
-      taps = ARGV.named.sort.map do |name|
+      taps = Homebrew.args.named.sort.map do |name|
         Tap.fetch(name)
       end
     end
 
     if args.json
-      raise UsageError, "invalid JSON version: #{args.json}" unless ["v1", true].include? args.json
+      raise UsageError, "Invalid JSON version: #{args.json}" unless ["v1", true].include? args.json
 
       print_tap_json(taps.sort_by(&:to_s))
     else

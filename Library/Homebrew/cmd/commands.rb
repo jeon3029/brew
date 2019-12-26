@@ -10,15 +10,16 @@ module Homebrew
       usage_banner <<~EOS
         `commands` [<options>]
 
-        Show a list of built-in and external commands.
+        Show lists of built-in and external commands.
       EOS
-      switch "--quiet",
-             description: "List only the names of commands without the header."
+      switch :quiet,
+             description: "List only the names of commands without category headers."
       switch "--include-aliases",
              depends_on:  "--quiet",
-             description: "Include the aliases of internal commands."
+             description: "Include aliases of internal commands."
       switch :verbose
       switch :debug
+      max_named 0
     end
   end
 
@@ -35,21 +36,18 @@ module Homebrew
     end
 
     # Find commands in Homebrew/cmd
-    puts "Built-in commands"
-    puts Formatter.columns(internal_commands.sort)
+    ohai "Built-in commands", Formatter.columns(internal_commands.sort)
 
     # Find commands in Homebrew/dev-cmd
     puts
-    puts "Built-in developer commands"
-    puts Formatter.columns(internal_developer_commands.sort)
+    ohai "Built-in developer commands", Formatter.columns(internal_developer_commands.sort)
 
     exts = external_commands
     return if exts.empty?
 
     # Find commands in the PATH
     puts
-    puts "External commands"
-    puts Formatter.columns(exts)
+    ohai "External commands", Formatter.columns(exts)
   end
 
   def internal_commands

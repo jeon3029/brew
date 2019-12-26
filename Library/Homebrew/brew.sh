@@ -26,8 +26,17 @@ esac
 # Higher depths mean this command was invoked by another Homebrew command.
 export HOMEBREW_COMMAND_DEPTH=$((HOMEBREW_COMMAND_DEPTH + 1))
 
+ohai() {
+  if [[ -t 1 && -z "$HOMEBREW_NO_COLOR" ]] # check whether stdout is a tty.
+  then
+    echo -e "\\033[34m==>\\033[0m \\033[1m$*\\033[0m" # blue arrow and bold text
+  else
+    echo "==> $*"
+  fi
+}
+
 onoe() {
-  if [[ -t 2 ]] # check whether stderr is a tty.
+  if [[ -t 2 && -z "$HOMEBREW_NO_COLOR" ]] # check whether stderr is a tty.
   then
     echo -ne "\\033[4;31mError\\033[0m: " >&2 # highlight Error with underline and red color
   else
@@ -61,15 +70,15 @@ git() {
 numeric() {
   # Condense the exploded argument into a single return value.
   # shellcheck disable=SC2086,SC2183
-  printf "%01d%02d%02d%03d" ${1//[.rc]/ }
+  printf "%01d%02d%02d%03d" ${1//[.rc]/ } 2>/dev/null
 }
 
 HOMEBREW_VERSION="$(git -C "$HOMEBREW_REPOSITORY" describe --tags --dirty --abbrev=7 2>/dev/null)"
 HOMEBREW_USER_AGENT_VERSION="$HOMEBREW_VERSION"
 if [[ -z "$HOMEBREW_VERSION" ]]
 then
-  HOMEBREW_VERSION=">=1.7.1 (shallow or no git repository)"
-  HOMEBREW_USER_AGENT_VERSION="1.X.Y"
+  HOMEBREW_VERSION=">=2.2.0 (shallow or no git repository)"
+  HOMEBREW_USER_AGENT_VERSION="2.X.Y"
 fi
 
 if [[ "$HOMEBREW_PREFIX" = "/" || "$HOMEBREW_PREFIX" = "/usr" ]]
@@ -133,7 +142,7 @@ then
 
   # Set a variable when the macOS system Ruby is new enough to avoid spawning
   # a Ruby process unnecessarily.
-  if [[ "$HOMEBREW_MACOS_VERSION_NUMERIC" -lt "101303" ]]
+  if [[ "$HOMEBREW_MACOS_VERSION_NUMERIC" -lt "101500" ]]
   then
     unset HOMEBREW_MACOS_SYSTEM_RUBY_NEW_ENOUGH
   else
@@ -381,8 +390,8 @@ fi
 check-run-command-as-root() {
   [[ "$(id -u)" = 0 ]] || return
 
-  # Allow Azure Pipelines/Docker/Kubernetes to do everything as root (as it's normal there)
-  [[ -f /proc/1/cgroup ]] && grep -E "azpl_job|docker|kubepods" -q /proc/1/cgroup && return
+  # Allow Azure Pipelines/Docker/Concourse/Kubernetes to do everything as root (as it's normal there)
+  [[ -f /proc/1/cgroup ]] && grep -E "azpl_job|docker|garden|kubepods" -q /proc/1/cgroup && return
 
   # Homebrew Services may need `sudo` for system-wide daemons.
   [[ "$HOMEBREW_COMMAND" = "services" ]] && return
@@ -465,6 +474,20 @@ update-preinstall() {
         "$HOMEBREW_CASK_COMMAND" = "install" || "$HOMEBREW_CASK_COMMAND" = "upgrade" ]]
   then
     export HOMEBREW_AUTO_UPDATING="1"
+
+    # Skip auto-update if the cask/core tap has been updated in the
+    # last $HOMEBREW_AUTO_UPDATE_SECS.
+    if [[ "$HOMEBREW_COMMAND" = "cask" ]]
+    then
+      tap_fetch_head="$HOMEBREW_LIBRARY/Taps/homebrew/homebrew-cask/.git/FETCH_HEAD"
+    else
+      tap_fetch_head="$HOMEBREW_LIBRARY/Taps/homebrew/homebrew-core/.git/FETCH_HEAD"
+    fi
+    if [[ -f "$tap_fetch_head" &&
+          -n "$(find "$tap_fetch_head" -type f -mtime -"${HOMEBREW_AUTO_UPDATE_SECS}"s 2>/dev/null)" ]]
+    then
+      return
+    fi
 
     if [[ -z "$HOMEBREW_VERBOSE" ]]
     then

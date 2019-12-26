@@ -1,6 +1,4 @@
-# Uses ERB so can't use Frozen String Literals until >=Ruby 2.4:
-# https://bugs.ruby-lang.org/issues/12031
-# frozen_string_literal: false
+# frozen_string_literal: true
 
 require "formula"
 require "utils/bottles"
@@ -11,12 +9,12 @@ require "cli/parser"
 require "utils/inreplace"
 require "erb"
 
-BOTTLE_ERB = <<-EOS.freeze
+BOTTLE_ERB = <<-EOS
   bottle do
     <% if !root_url.start_with?(HOMEBREW_BOTTLE_DEFAULT_DOMAIN) %>
     root_url "<%= root_url %>"
     <% end %>
-    <% if ![Homebrew::DEFAULT_PREFIX, "/usr/local"].include?(prefix) %>
+    <% if ![HOMEBREW_DEFAULT_PREFIX, LINUXBREW_DEFAULT_PREFIX].include?(prefix) %>
     prefix "<%= prefix %>"
     <% end %>
     <% if cellar.is_a? Symbol %>
@@ -30,7 +28,7 @@ BOTTLE_ERB = <<-EOS.freeze
     <% checksums.each do |checksum_type, checksum_values| %>
     <% checksum_values.each do |checksum_value| %>
     <% checksum, macos = checksum_value.shift %>
-    <%= checksum_type %> "<%= checksum %>" => :<%= macos %><%= "_or_later" if Homebrew.args.or_later? %>
+    <%= checksum_type %> "<%= checksum %>" => :<%= macos %>
     <% end %>
     <% end %>
   end
@@ -43,7 +41,7 @@ module Homebrew
 
   def bottle_args
     Homebrew::CLI::Parser.new do
-      usage_banner <<~EOS.freeze
+      usage_banner <<~EOS
         `bottle` [<options>] <formula>
 
         Generate a bottle (binary package) from a formula that was installed with
@@ -54,8 +52,6 @@ module Homebrew
       EOS
       switch "--skip-relocation",
              description: "Do not check if the bottle can be marked as relocatable."
-      switch "--or-later",
-             description: "Append `_or_later` to the bottle tag."
       switch "--force-core-tap",
              description: "Build a bottle even if <formula> is not in `homebrew/core` or any installed taps."
       switch "--no-rebuild",
@@ -64,15 +60,15 @@ module Homebrew
              description: "If the formula specifies a rebuild version, attempt to preserve its value in the "\
                           "generated DSL."
       switch "--json",
-             description: "Write bottle information to a JSON file, which can be used as the argument for "\
+             description: "Write bottle information to a JSON file, which can be used as the value for "\
                           "`--merge`."
       switch "--merge",
              description: "Generate an updated bottle block for a formula and optionally merge it into the "\
-                          "formula file. Instead of a formula name, requires a JSON file generated with "\
+                          "formula file. Instead of a formula name, requires the path to a JSON file generated with "\
                           "`brew bottle --json` <formula>."
       switch "--write",
              depends_on:  "--merge",
-             description: "Write the changes to the formula file. A new commit will be generated unless "\
+             description: "Write changes to the formula file. A new commit will be generated unless "\
                           "`--no-commit` is passed."
       switch "--no-commit",
              depends_on:  "--write",
@@ -90,8 +86,9 @@ module Homebrew
     bottle_args.parse
 
     return merge if args.merge?
+    raise KegUnspecifiedError if args.remaining.empty?
 
-    ensure_relocation_formulae_installed!
+    ensure_relocation_formulae_installed! unless args.skip_relocation?
     ARGV.resolved_formulae.each do |f|
       bottle_formula f
     end
@@ -99,7 +96,7 @@ module Homebrew
 
   def ensure_relocation_formulae_installed!
     Keg.relocation_formulae.each do |f|
-      next if Formula[f].installed?
+      next if Formula[f].latest_version_installed?
 
       ohai "Installing #{f}..."
       safe_system HOMEBREW_BREW_FILE, "install", f
@@ -176,7 +173,7 @@ module Homebrew
       end
 
       if text_matches.size > MAXIMUM_STRING_MATCHES
-        puts "Only the first #{MAXIMUM_STRING_MATCHES} matches were output"
+        puts "Only the first #{MAXIMUM_STRING_MATCHES} matches were output."
       end
     end
 
@@ -209,7 +206,7 @@ module Homebrew
   end
 
   def bottle_formula(f)
-    return ofail "Formula not installed or up-to-date: #{f.full_name}" unless f.installed?
+    return ofail "Formula not installed or up-to-date: #{f.full_name}" unless f.latest_version_installed?
 
     unless tap = f.tap
       return ofail "Formula not from core or any installed taps: #{f.full_name}" unless args.force_core_tap?
@@ -223,7 +220,7 @@ module Homebrew
       return
     end
 
-    return ofail "Formula not installed with '--build-bottle': #{f.full_name}" unless Utils::Bottles.built_as? f
+    return ofail "Formula was not installed with --build-bottle: #{f.full_name}" unless Utils::Bottles.built_as? f
 
     return ofail "Formula has no stable version: #{f.full_name}" unless f.stable
 
@@ -265,6 +262,8 @@ module Homebrew
 
         changed_files = keg.replace_locations_with_placeholders unless args.skip_relocation?
 
+        Formula.clear_cache
+        Keg.clear_cache
         Tab.clear_cache
         tab = Tab.for_keg(keg)
         original_tab = tab.dup
@@ -367,9 +366,11 @@ module Homebrew
       mismatches = [:root_url, :prefix, :cellar, :rebuild].reject do |key|
         old_spec.send(key) == bottle.send(key)
       end
-      if old_spec.cellar == :any && bottle.cellar == :any_skip_relocation
+      if (old_spec.cellar == :any && bottle.cellar == :any_skip_relocation) ||
+         (old_spec.cellar == cellar &&
+          [:any, :any_skip_relocation].include?(bottle.cellar))
         mismatches.delete(:cellar)
-        bottle.cellar :any
+        bottle.cellar old_spec.cellar
       end
       unless mismatches.empty?
         bottle_path.unlink if bottle_path.exist?
@@ -380,7 +381,7 @@ module Homebrew
           "#{key}: old: #{old_value}, new: #{value}"
         end
 
-        odie <<~EOS.freeze
+        odie <<~EOS
           --keep-old was passed but there are changes in:
           #{mismatches.join("\n")}
         EOS
@@ -394,8 +395,6 @@ module Homebrew
 
     return unless args.json?
 
-    tag = Utils::Bottles.tag.to_s
-    tag += "_or_later" if args.or_later?
     json = {
       f.full_name => {
         "formula" => {
@@ -408,7 +407,7 @@ module Homebrew
           "cellar"   => bottle.cellar.to_s,
           "rebuild"  => bottle.rebuild,
           "tags"     => {
-            tag => {
+            Utils::Bottles.tag.to_s => {
               "filename"       => filename.bintray,
               "local_filename" => filename.to_s,
               "sha256"         => sha256,
@@ -428,8 +427,9 @@ module Homebrew
 
   def merge
     write = args.write?
+    raise UsageError, "--merge requires a JSON file path argument" if Homebrew.args.named.blank?
 
-    bottles_hash = ARGV.named.reduce({}) do |hash, json_file|
+    bottles_hash = Homebrew.args.named.reduce({}) do |hash, json_file|
       hash.deep_merge(JSON.parse(IO.read(json_file)))
     end
 
@@ -491,7 +491,7 @@ module Homebrew
               end
 
               unless mismatches.empty?
-                odie <<~EOS.freeze
+                odie <<~EOS
                   --keep-old was passed but there are changes in:
                   #{mismatches.join("\n")}
                 EOS
@@ -530,14 +530,13 @@ module Homebrew
 
         unless args.no_commit?
           if ENV["HOMEBREW_GIT_NAME"]
-            ENV["GIT_AUTHOR_NAME"] =
-              ENV["GIT_COMMITTER_NAME"] =
-                ENV["HOMEBREW_GIT_NAME"]
+            ENV["GIT_AUTHOR_NAME"] = ENV["GIT_COMMITTER_NAME"] =
+              ENV["HOMEBREW_GIT_NAME"]
           end
+
           if ENV["HOMEBREW_GIT_EMAIL"]
-            ENV["GIT_AUTHOR_EMAIL"] =
-              ENV["GIT_COMMITTER_EMAIL"] =
-                ENV["HOMEBREW_GIT_EMAIL"]
+            ENV["GIT_AUTHOR_EMAIL"] = ENV["GIT_COMMITTER_EMAIL"] =
+              ENV["HOMEBREW_GIT_EMAIL"]
           end
 
           short_name = formula_name.split("/", -1).last

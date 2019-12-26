@@ -45,12 +45,10 @@ module Cask
         return if dry_run?
 
         upgradable_casks.each do |(old_cask, new_cask)|
-          begin
-            upgrade_cask(old_cask, new_cask)
-          rescue CaskError => e
-            caught_exceptions << e
-            next
-          end
+          upgrade_cask(old_cask, new_cask)
+        rescue => e
+          caught_exceptions << e
+          next
         end
 
         return if caught_exceptions.empty?
@@ -105,7 +103,7 @@ module Cask
 
           # If successful, wipe the old Cask from staging
           old_cask_installer.finalize_upgrade
-        rescue CaskError => e
+        rescue => e
           new_cask_installer.uninstall_artifacts if new_artifacts_installed
           new_cask_installer.purge_versioned_files
           old_cask_installer.revert_upgrade if started_upgrade

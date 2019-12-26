@@ -17,7 +17,7 @@ module Homebrew
         Uninstall <formula>.
       EOS
       switch :force,
-             description: "Delete all installed versions of the <formula>"
+             description: "Delete all installed versions of <formula>."
       switch "--ignore-dependencies",
              description: "Don't fail uninstall, even if <formula> is a dependency of any installed "\
                           "formulae."
@@ -38,7 +38,7 @@ module Homebrew
         [rack, rack.subdirs.map { |d| Keg.new(d) }]
       end]
     else
-      ARGV.kegs.group_by(&:rack)
+      Homebrew.args.kegs.group_by(&:rack)
     end
 
     handle_unsatisfied_dependents(kegs_by_rack)
@@ -79,7 +79,7 @@ module Homebrew
             if rack.directory?
               versions = rack.subdirs.map(&:basename)
               puts "#{keg.name} #{versions.to_sentence} #{"is".pluralize(versions.count)} still installed."
-              puts "Remove all versions with `brew uninstall --force #{keg.name}`."
+              puts "Run `brew uninstall --force #{keg.name}` to remove all versions."
             end
           end
         end
@@ -87,7 +87,7 @@ module Homebrew
     end
   rescue MultipleVersionsInstalledError => e
     ofail e
-    puts "Use `brew uninstall --force #{e.name}` to remove all versions."
+    puts "Run `brew uninstall --force #{e.name}` to remove all versions."
   ensure
     # If we delete Cellar/newname, then Cellar/oldname symlink
     # can become broken and we have to remove it.

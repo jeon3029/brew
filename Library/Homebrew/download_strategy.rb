@@ -242,7 +242,7 @@ class AbstractFileDownloadStrategy < AbstractDownloadStrategy
   end
 
   def parse_basename(url)
-    uri_path = if URI::DEFAULT_PARSER.make_regexp =~ url
+    uri_path = if url.match?(URI::DEFAULT_PARSER.make_regexp)
       uri = URI(url)
 
       if uri.query
@@ -390,7 +390,7 @@ class CurlDownloadStrategy < AbstractFileDownloadStrategy
     time =
       lines.map { |line| line[/^Last\-Modified:\s*(.+)/i, 1] }
            .compact
-           .map(&Time.public_method(:parse))
+           .map { |t| t.match?(/^\d+$/) ? Time.at(t.to_i) : Time.parse(t) }
            .last
 
     basename = filenames.last || parse_basename(redirect_url)
@@ -421,6 +421,8 @@ class CurlDownloadStrategy < AbstractFileDownloadStrategy
 
     args += ["--user", meta.fetch(:user)] if meta.key?(:user)
 
+    args += ["--header", meta.fetch(:header)] if meta.key?(:header)
+
     args
   end
 
@@ -435,7 +437,7 @@ class CurlDownloadStrategy < AbstractFileDownloadStrategy
   end
 
   def curl(*args, **options)
-    args << "--connect-timeout" << "5" unless mirrors.empty?
+    args << "--connect-timeout" << "15" unless mirrors.empty?
     super(*_curl_args, *args, **_curl_opts, **options)
   end
 end
@@ -550,6 +552,7 @@ class SubversionDownloadStrategy < VCSDownloadStrategy
     # This saves on bandwidth and will have a similar effect to verifying the
     # cache as it will make any changes to get the right revision.
     args = []
+    args << "--quiet" unless ARGV.verbose?
 
     if revision
       ohai "Checking out #{@ref}"
@@ -857,7 +860,7 @@ class CVSDownloadStrategy < VCSDownloadStrategy
 
     if meta.key?(:module)
       @module = meta.fetch(:module)
-    elsif @url !~ %r{:[^/]+$}
+    elsif !@url.match?(%r{:[^/]+$})
       @module = name
     else
       @module, @url = split_url(@url)
@@ -1119,7 +1122,7 @@ class DownloadStrategyDetector
     when :post                   then CurlPostDownloadStrategy
     when :fossil                 then FossilDownloadStrategy
     else
-      raise "Unknown download strategy #{symbol} was requested."
+      raise TypeError, "Unknown download strategy #{symbol} was requested."
     end
   end
 end

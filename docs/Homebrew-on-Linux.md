@@ -78,18 +78,18 @@ Homebrew does not currently support 32-bit x86 platforms. It would be possible f
 
 ## Alternative Installation
 
-Extract or `git clone` Homebrew wherever you want. Use `/home/linuxbrew/.linuxbrew` if possible (to enabled the use of binary packages).
+Extract or `git clone` Homebrew wherever you want. Use `/home/linuxbrew/.linuxbrew` if possible (to enable the use of binary packages).
 
 ```sh
 git clone https://github.com/Homebrew/brew ~/.linuxbrew/Homebrew
 mkdir ~/.linuxbrew/bin
-ln -s ../Homebrew/bin/brew ~/.linuxbrew/bin
+ln -s ~/.linuxbrew/Homebrew/bin/brew ~/.linuxbrew/bin
 eval $(~/.linuxbrew/bin/brew shellenv)
 ```
 
 ## Homebrew on Linux Community
 
-- [@Linuxbrew on Twitter](https://twitter.com/Linuxbrew)
+- [@HomebrewOnLinux on Twitter](https://twitter.com/HomebrewOnLinux)
 - [Homebrew/linuxbrew-core on GitHub](https://github.com/Homebrew/linuxbrew-core)
 - [Homebrew on Linux category](https://discourse.brew.sh/c/linuxbrew) of [Homebrew's Discourse](https://discourse.brew.sh)
 

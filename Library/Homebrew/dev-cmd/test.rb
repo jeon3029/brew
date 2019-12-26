@@ -24,7 +24,7 @@ module Homebrew
       switch "--HEAD",
              description: "Test the head version of a formula."
       switch "--keep-tmp",
-             description: "Keep the temporary files created for the test."
+             description: "Retain the temporary files created for the test."
       switch :verbose
       switch :debug
       conflicts "--devel", "--HEAD"
@@ -40,7 +40,7 @@ module Homebrew
 
     ARGV.resolved_formulae.each do |f|
       # Cannot test uninstalled formulae
-      unless f.installed?
+      unless f.latest_version_installed?
         ofail "Testing requires the latest version of #{f.full_name}"
         next
       end
@@ -82,7 +82,7 @@ module Homebrew
           --
           #{HOMEBREW_LIBRARY_PATH}/test.rb
           #{f.path}
-        ].concat(ARGV.options_only)
+        ].concat(Homebrew.args.options_only)
 
         if f.head?
           args << "--HEAD"

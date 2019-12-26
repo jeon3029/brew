@@ -10,16 +10,15 @@ module Homebrew
       usage_banner <<~EOS
         `--version`
 
-        Print the version number of Homebrew, Homebrew/homebrew-core and Homebrew/homebrew-cask
-        (if tapped) to standard output and exit.
+        Print the version numbers of Homebrew, Homebrew/homebrew-core and Homebrew/homebrew-cask
+        (if tapped) to standard output.
       EOS
+      max_named 0
     end
   end
 
   def __version
     __version_args.parse
-
-    odie "This command does not take arguments." if ARGV.any?
 
     puts "Homebrew #{HOMEBREW_VERSION}"
     puts "#{CoreTap.instance.full_name} #{CoreTap.instance.version_string}"

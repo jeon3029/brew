@@ -10,8 +10,8 @@ module Homebrew
       usage_banner <<~EOS
         `home` [<formula>]
 
-        Open <formula>'s homepage in a browser. If no formula is provided,
-        open Homebrew's own homepage in a browser.
+        Open <formula>'s homepage in a browser, or open Homebrew's own homepage
+        if no formula is provided.
       EOS
       switch :debug
     end
@@ -23,7 +23,7 @@ module Homebrew
     if args.remaining.empty?
       exec_browser HOMEBREW_WWW
     else
-      exec_browser(*ARGV.formulae.map(&:homepage))
+      exec_browser(*Homebrew.args.formulae.map(&:homepage))
     end
   end
 end

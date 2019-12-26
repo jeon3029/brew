@@ -3,6 +3,8 @@ inherit_from: ./.rubocop_shared.yml
 Cask/HomepageMatchesUrl:
   Description: 'Ensure that the homepage and url match, otherwise add a comment. More info at https://github.com/Homebrew/homebrew-cask/blob/master/doc/cask_language_reference/stanzas/url.md#when-url-and-homepage-hostnames-differ-add-a-comment'
   Enabled: true
+  Exclude:
+  - '**/test/support/fixtures/cask/Casks/**/*.rb'
 
 Cask/HomepageUrlTrailingSlash:
   Description: 'Ensure that the homepage url has a slash after the domain name.'
@@ -20,18 +22,18 @@ Cask/StanzaOrder:
   Description: 'Ensure that cask stanzas are sorted correctly. More info at https://github.com/Homebrew/homebrew-cask/blob/master/CONTRIBUTING.md#stanza-order'
   Enabled: true
 
-Layout/AlignHash:
+Layout/HashAlignment:
   EnforcedHashRocketStyle: table
   EnforcedColonStyle: table
 
-Layout/IndentFirstArrayElement:
+Layout/FirstArrayElementIndentation:
   EnforcedStyle: align_brackets
 
-Layout/IndentFirstHashElement:
+Layout/FirstHashElementIndentation:
   EnforcedStyle: align_braces
 
 # Casks often contain long URLs and file paths.
-Metrics/LineLength:
+Layout/LineLength:
   Enabled: false
 
 # Casks don't need documentation.

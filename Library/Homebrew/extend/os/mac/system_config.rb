@@ -22,7 +22,7 @@ class SystemConfig
     def describe_homebrew_ruby
       s = describe_homebrew_ruby_version
 
-      if RUBY_PATH.to_s !~ %r{^/System/Library/Frameworks/Ruby\.framework/Versions/[12]\.[089]/usr/bin/ruby}
+      if !RUBY_PATH.to_s.match?(%r{^/System/Library/Frameworks/Ruby\.framework/Versions/[12]\.[089]/usr/bin/ruby})
         "#{s} => #{RUBY_PATH}"
       else
         s
@@ -41,10 +41,6 @@ class SystemConfig
       @clt ||= MacOS::CLT.version if MacOS::CLT.installed?
     end
 
-    def clt_headers
-      @clt_headers ||= MacOS::CLT.headers_version if MacOS::CLT.headers_installed?
-    end
-
     def xquartz
       @xquartz ||= "#{MacOS::XQuartz.version} => #{describe_path(MacOS::XQuartz.prefix)}" if MacOS::XQuartz.installed?
     end
@@ -54,7 +50,6 @@ class SystemConfig
       f.puts "macOS: #{MacOS.full_version}-#{kernel}"
       f.puts "CLT: #{clt || "N/A"}"
       f.puts "Xcode: #{xcode || "N/A"}"
-      f.puts "CLT headers: #{clt_headers}" if MacOS::CLT.separate_header_package? && clt_headers
       f.puts "XQuartz: #{xquartz}" if xquartz
     end
   end

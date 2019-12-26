@@ -34,15 +34,13 @@ describe Homebrew::Cleanup do
   let(:lock_file) { Pathname.new("#{HOMEBREW_LOCKS}/foo") }
 
   around do |example|
-    begin
-      FileUtils.touch ds_store
-      FileUtils.touch lock_file
+    FileUtils.touch ds_store
+    FileUtils.touch lock_file
 
-      example.run
-    ensure
-      FileUtils.rm_f ds_store
-      FileUtils.rm_f lock_file
-    end
+    example.run
+  ensure
+    FileUtils.rm_f ds_store
+    FileUtils.rm_f lock_file
   end
 
   describe "::cleanup" do
@@ -126,17 +124,17 @@ describe Homebrew::Cleanup do
       Tab.create(f, DevelopmentTools.default_compiler, :libcxx).write
     end
 
-    expect(f1).to be_installed
-    expect(f2).to be_installed
-    expect(f3).to be_installed
-    expect(f4).to be_installed
+    expect(f1).to be_latest_version_installed
+    expect(f2).to be_latest_version_installed
+    expect(f3).to be_latest_version_installed
+    expect(f4).to be_latest_version_installed
 
     subject.cleanup_formula f3
 
-    expect(f1).not_to be_installed
-    expect(f2).not_to be_installed
-    expect(f3).to be_installed
-    expect(f4).to be_installed
+    expect(f1).not_to be_latest_version_installed
+    expect(f2).not_to be_latest_version_installed
+    expect(f3).to be_latest_version_installed
+    expect(f4).to be_latest_version_installed
   end
 
   describe "#cleanup_cask", :cask do

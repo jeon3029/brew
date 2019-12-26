@@ -11,16 +11,15 @@ module Homebrew
   def missing_args
     Homebrew::CLI::Parser.new do
       usage_banner <<~EOS
-        `missing` [<options>] [<formulae>]
+        `missing` [<options>] [<formula>]
 
-        Check the given <formula> for missing dependencies. If no <formula> are
-        given, check all installed brews.
-
-        `missing` exits with a non-zero status if any formulae are missing dependencies.
+        Check the given <formula> kegs for missing dependencies. If no <formula> are
+        provided, check all kegs. Will exit with a non-zero status if any kegs are found
+        to be missing dependencies.
       EOS
       comma_array "--hide",
-                  description: "Act as if none of the provided <hidden> are installed. <hidden> should be "\
-                               "comma-separated list of formulae."
+                  description: "Act as if none of the specified <hidden> are installed. <hidden> should be "\
+                               "a comma-separated list of formulae."
       switch :verbose
       switch :debug
     end
@@ -28,9 +27,10 @@ module Homebrew
 
   def missing
     missing_args.parse
+
     return unless HOMEBREW_CELLAR.exist?
 
-    ff = if ARGV.named.empty?
+    ff = if Homebrew.args.named.blank?
       Formula.installed.sort
     else
       ARGV.resolved_formulae.sort

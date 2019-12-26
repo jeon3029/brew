@@ -15,13 +15,14 @@ module Homebrew
       EOS
       switch :verbose
       switch :debug
+      max_named 1
     end
   end
 
   def tap_new
     tap_new_args.parse
 
-    raise "A tap argument is required" if ARGV.named.empty?
+    raise UsageError, "This command requires a tap argument" if ARGV.named.empty?
 
     tap = Tap.fetch(ARGV.named.first)
     titleized_user = tap.user.dup
@@ -58,7 +59,7 @@ module Homebrew
         steps:
           - bash: |
               set -e
-              sudo xcode-select --switch /Applications/Xcode_10.2.app/Contents/Developer
+              sudo xcode-select --switch /Applications/Xcode_10.2.1.app/Contents/Developer
               brew update
               HOMEBREW_TAP_DIR="/usr/local/Homebrew/Library/Taps/#{tap.full_name}"
               mkdir -p "$HOMEBREW_TAP_DIR"

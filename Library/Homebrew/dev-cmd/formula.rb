@@ -11,7 +11,7 @@ module Homebrew
       usage_banner <<~EOS
         `formula` <formula>
 
-        Display the path where a formula is located.
+        Display the path where <formula> is located.
       EOS
       switch :verbose
       switch :debug
@@ -21,7 +21,7 @@ module Homebrew
   def formula
     formula_args.parse
 
-    raise FormulaUnspecifiedError if ARGV.named.empty?
+    raise FormulaUnspecifiedError if Homebrew.args.named.blank?
 
     ARGV.resolved_formulae.each { |f| puts f.path }
   end

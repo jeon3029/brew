@@ -11,18 +11,18 @@ module Homebrew
   def __env_args
     Homebrew::CLI::Parser.new do
       usage_banner <<~EOS
-        `--env` [<options>]
+        `--env` [<options>] [<formula>]
 
-        Show a summary of the Homebrew build environment as a plain list.
+        Summarise Homebrew's build environment as a plain list.
 
         If the command's output is sent through a pipe and no shell is specified,
         the list is formatted for export to `bash`(1) unless `--plain` is passed.
       EOS
-      flag "--shell=",
-           description: "Generate a list of environment variables for the specified shell, " \
-                        "or `--shell=auto` to detect the current shell."
+      flag   "--shell=",
+             description: "Generate a list of environment variables for the specified shell, " \
+                          "or `--shell=auto` to detect the current shell."
       switch "--plain",
-             description: "Plain output even when piped."
+             description: "Generate plain output even when piped."
     end
   end
 
@@ -30,7 +30,7 @@ module Homebrew
     __env_args.parse
 
     ENV.activate_extensions!
-    ENV.deps = ARGV.formulae if superenv?
+    ENV.deps = Homebrew.args.formulae if superenv?
     ENV.setup_build_environment
     ENV.universal_binary if ARGV.build_universal?
 

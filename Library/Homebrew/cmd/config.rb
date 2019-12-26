@@ -11,18 +11,17 @@ module Homebrew
       usage_banner <<~EOS
         `config`
 
-        Show Homebrew and system configuration useful for debugging. If you file
-        a bug report, you will likely be asked for this information if you do not
-        provide it.
+        Show Homebrew and system configuration info useful for debugging. If you file
+        a bug report, you will be required to provide this information.
       EOS
       switch :verbose
       switch :debug
+      max_named 0
     end
   end
 
   def config
     config_args.parse
-    raise UsageError unless args.remaining.empty?
 
     SystemConfig.dump_verbose_config
   end
